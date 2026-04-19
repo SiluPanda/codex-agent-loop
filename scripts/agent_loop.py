@@ -4,11 +4,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import textwrap
 import time
 import uuid
@@ -176,6 +176,10 @@ class ApprovalPause(SystemExit):
 class PatchHunk:
     before: list[str]
     after: list[str]
+    old_start: int | None = None
+
+
+HUNK_HEADER_RE = re.compile(r"^@@(?: -(?P<old_start>\d+)(?:,\d+)? \+\d+(?:,\d+)?)? @@")
 
 
 def parse_budget_shorthand(token: str) -> tuple[str, int] | None:
@@ -457,6 +461,14 @@ def simple_command_is_read_only(parts: Sequence[str]) -> bool:
     cmd = parts[0]
     if cmd == "git":
         return git_command_is_read_only(parts)
+    if cmd == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in parts[1:]):
+        return False
+    if cmd == "awk":
+        for index, arg in enumerate(parts[1:], start=1):
+            if arg == "-i" and index + 1 < len(parts) and parts[index + 1] == "inplace":
+                return False
+    if cmd == "perl" and any(re.fullmatch(r"-[A-Za-z]*i[A-Za-z]*", arg) for arg in parts[1:]):
+        return False
     if cmd == "find" and any(flag in FIND_WRITE_FLAGS for flag in parts[1:]):
         return False
     return cmd in SAFE_COMMANDS
@@ -502,19 +514,22 @@ def safe_workspace_path(workspace_root: Path, relative_path: str) -> Path:
 
 
 def parse_headerless_hunks(diff_text: str) -> list[PatchHunk]:
-    lines = diff_text.replace("\r\n", "\n").split("\n")
+    lines = diff_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     hunks: list[PatchHunk] = []
     current_before: list[str] | None = None
     current_after: list[str] | None = None
+    current_old_start: int | None = None
 
     for line in lines:
         if line.startswith(("--- ", "+++ ")) or line == "\\ No newline at end of file":
             continue
         if line.startswith("@@"):
             if current_before is not None:
-                hunks.append(PatchHunk(current_before, current_after or []))
+                hunks.append(PatchHunk(current_before, current_after or [], current_old_start))
             current_before = []
             current_after = []
+            match = HUNK_HEADER_RE.match(line)
+            current_old_start = int(match.group("old_start")) if match and match.group("old_start") else None
             continue
         if line and line[0] in {" ", "+", "-"}:
             if current_before is None:
@@ -530,7 +545,7 @@ def parse_headerless_hunks(diff_text: str) -> list[PatchHunk]:
             continue
 
     if current_before is not None:
-        hunks.append(PatchHunk(current_before, current_after or []))
+        hunks.append(PatchHunk(current_before, current_after or [], current_old_start))
     return hunks
 
 
@@ -544,17 +559,45 @@ def find_subsequence(haystack: list[str], needle: list[str], start: int = 0) -> 
     return None
 
 
+def detect_line_ending(text: str) -> str:
+    if "\r\n" in text:
+        return "\r\n"
+    if "\r" in text:
+        return "\r"
+    return "\n"
+
+
+def read_text_preserve_newlines(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def write_text_preserve_newlines(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
 def apply_update_diff(original_text: str, diff_text: str) -> str:
     hunks = parse_headerless_hunks(diff_text)
     if not hunks:
         raise LoopError("Could not parse update_file diff into hunks.")
 
-    lines = original_text.replace("\r\n", "\n").split("\n")
-    original_had_trailing_newline = original_text.endswith("\n")
+    line_ending = detect_line_ending(original_text)
+    lines = original_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    original_had_trailing_newline = original_text.endswith(("\n", "\r"))
     cursor = 0
+    line_offset = 0
 
     for hunk in hunks:
-        idx = find_subsequence(lines, hunk.before, cursor)
+        idx: int | None = None
+        if hunk.old_start is not None:
+            preferred_idx = max(0, hunk.old_start - 1 + line_offset)
+            if lines[preferred_idx : preferred_idx + len(hunk.before)] == hunk.before:
+                idx = preferred_idx
+            else:
+                idx = find_subsequence(lines, hunk.before, preferred_idx)
+        if idx is None:
+            idx = find_subsequence(lines, hunk.before, cursor)
         if idx is None:
             idx = find_subsequence(lines, hunk.before, 0)
         if idx is None:
@@ -563,10 +606,11 @@ def apply_update_diff(original_text: str, diff_text: str) -> str:
         end = idx + len(hunk.before)
         lines[idx:end] = hunk.after
         cursor = idx + len(hunk.after)
+        line_offset += len(hunk.after) - len(hunk.before)
 
-    rendered = "\n".join(lines)
-    if original_had_trailing_newline and rendered and not rendered.endswith("\n"):
-        rendered += "\n"
+    rendered = line_ending.join(lines)
+    if original_had_trailing_newline and rendered and not rendered.endswith(("\n", "\r")):
+        rendered += line_ending
     return rendered
 
 
@@ -609,7 +653,7 @@ def execute_apply_patch(call: Any, workspace_root: Path) -> tuple[dict[str, Any]
         if target.exists():
             raise LoopError(f"create_file target already exists: {rel_path}")
         rendered = render_created_file(diff_text)
-        target.write_text(rendered, encoding="utf-8")
+        write_text_preserve_newlines(target, rendered)
         log = {"tool": "apply_patch", "operation": op_type, "path": rel_path, "status": "completed"}
         output = {
             "type": "apply_patch_call_output",
@@ -622,9 +666,9 @@ def execute_apply_patch(call: Any, workspace_root: Path) -> tuple[dict[str, Any]
     if op_type == "update_file":
         if not target.exists():
             raise LoopError(f"update_file target does not exist: {rel_path}")
-        original = target.read_text(encoding="utf-8")
+        original = read_text_preserve_newlines(target)
         rendered = apply_update_diff(original, diff_text)
-        target.write_text(rendered, encoding="utf-8")
+        write_text_preserve_newlines(target, rendered)
         log = {"tool": "apply_patch", "operation": op_type, "path": rel_path, "status": "completed"}
         output = {
             "type": "apply_patch_call_output",
@@ -1303,8 +1347,11 @@ def build_codex_exec_prompt(
     ).strip()
 
 
-def parse_codex_exec_jsonl(output: str) -> str:
+def parse_codex_exec_telemetry(output: str) -> dict[str, Any]:
+    turns_used = 0
+    commands: list[str] = []
     last_text = ""
+
     for line in output.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -1313,11 +1360,79 @@ def parse_codex_exec_jsonl(output: str) -> str:
             event = json.loads(line)
         except Exception:
             continue
-        if event.get("type") == "item.completed":
-            item = event.get("item", {})
-            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
-                last_text = item["text"]
-    return last_text
+        if event.get("type") == "turn.started":
+            turns_used += 1
+            continue
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item", {})
+        if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+            last_text = item["text"]
+        elif item.get("type") == "command_execution" and isinstance(item.get("command"), str):
+            commands.append(item["command"])
+
+    return {
+        "final_text": last_text,
+        "turns_used": turns_used,
+        "verification_commands": commands,
+    }
+
+
+def parse_codex_exec_jsonl(output: str) -> str:
+    telemetry = parse_codex_exec_telemetry(output)
+    return str(telemetry["final_text"])
+
+
+def parse_git_status_porcelain(output: str) -> list[str]:
+    changed_paths: list[str] = []
+    for line in output.splitlines():
+        if not line:
+            continue
+        path = line[3:] if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip()
+        if path:
+            changed_paths.append(path)
+    return sorted(dict.fromkeys(changed_paths))
+
+
+def collect_changed_files(workspace_root: Path) -> list[str]:
+    if not has_git_repo(workspace_root):
+        return []
+    proc = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(workspace_root),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return []
+    return parse_git_status_porcelain(normalize_subprocess_stream(proc.stdout))
+
+
+def snapshot_workspace_files(workspace_root: Path) -> dict[str, tuple[int, int]]:
+    snapshot: dict[str, tuple[int, int]] = {}
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        dirnames[:] = [name for name in dirnames if name != ".git"]
+        base = Path(dirpath)
+        for filename in filenames:
+            path = base / filename
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if not path.is_file():
+                continue
+            snapshot[str(path.relative_to(workspace_root))] = (int(stat.st_size), int(stat.st_mtime_ns))
+    return snapshot
+
+
+def diff_workspace_snapshots(
+    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]
+) -> list[str]:
+    changed_paths = [path for path in sorted(set(before) | set(after)) if before.get(path) != after.get(path)]
+    return changed_paths
 
 
 def run_codex_exec_loop(
@@ -1355,6 +1470,7 @@ def run_codex_exec_loop(
     cmd.append(prompt)
 
     started_at_unix = time.time()
+    before_snapshot = snapshot_workspace_files(workspace_root)
     timed_out = False
     try:
         proc = subprocess.run(
@@ -1373,10 +1489,12 @@ def run_codex_exec_loop(
         stderr = normalize_subprocess_stream(exc.stderr)
         returncode = 124
 
+    after_snapshot = snapshot_workspace_files(workspace_root)
     (run_dir / "codex_exec.stdout.jsonl").write_text(stdout, encoding="utf-8")
     (run_dir / "codex_exec.stderr.txt").write_text(stderr, encoding="utf-8")
 
-    final_text = parse_codex_exec_jsonl(stdout)
+    telemetry = parse_codex_exec_telemetry(stdout)
+    final_text = str(telemetry["final_text"])
     if not timed_out and returncode != 0 and not final_text:
         raise LoopError(
             "codex exec fallback failed"
@@ -1389,7 +1507,7 @@ def run_codex_exec_loop(
         "backend": "codex-exec",
         "run_dir": str(run_dir),
         "state_path": str(run_dir / "state.json"),
-        "turns_used": 1,
+        "turns_used": max(1, int(telemetry["turns_used"])),
         "max_turns": max_turns,
         "max_seconds": max_seconds,
         "elapsed_seconds": compute_elapsed_seconds(started_at_unix),
@@ -1398,8 +1516,8 @@ def run_codex_exec_loop(
         "approval_mode": approval_mode,
         "workspace_root": str(workspace_root),
         "task": task,
-        "files_changed": [],
-        "verification_commands": [],
+        "files_changed": diff_workspace_snapshots(before_snapshot, after_snapshot),
+        "verification_commands": list(telemetry["verification_commands"]),
         "final_answer": (
             final_text
             or (f"Stopped after reaching the {max_seconds}-second time budget." if timed_out else stderr.strip())
@@ -1416,15 +1534,20 @@ def print_demo_intro(workspace_root: Path) -> None:
     print()
 
 
+def suggested_demo_write_dir() -> Path:
+    return Path.home() / ".codex" / "agent-loop" / "demo-write-example"
+
+
 def print_demo_next_steps() -> None:
-    demo_write_dir = Path(tempfile.mkdtemp(prefix="agent-loop-demo-"))
+    demo_write_dir = suggested_demo_write_dir()
+    quoted_demo_write_dir = shlex.quote(str(demo_write_dir))
     script = quoted_script_command()
     print("\nQuickstart complete.")
     print("Next commands to try:")
     print(f"1) Setup check:\n   {script} --doctor")
     print(
         "2) Tiny write demo in a throwaway directory:\n"
-        f"   {script} --cwd {shlex.quote(str(demo_write_dir))} --approval-mode never "
+        f"   mkdir -p {quoted_demo_write_dir} && {script} --cwd {quoted_demo_write_dir} --approval-mode never "
         '"Create a file named hello.txt containing exactly hello from agent-loop."'
     )
     print(
@@ -1467,10 +1590,6 @@ def main(argv: Sequence[str]) -> int:
             run_dir = create_run_dir(runs_dir)
 
         backend_report = build_backend_report()
-        if not args.json:
-            if args.demo:
-                print_demo_intro(workspace_root)
-            print_backend_banner(backend_report)
 
         client: OpenAI | None
         if backend_report["backend"] == "responses":
@@ -1494,6 +1613,11 @@ def main(argv: Sequence[str]) -> int:
             client = None
         else:
             raise LoopError("No usable backend found. Run with --doctor for setup guidance.")
+
+        if not args.json:
+            if args.demo:
+                print_demo_intro(workspace_root)
+            print_backend_banner(backend_report)
 
         if client is None:
             if args.resume or args.approve_pending:

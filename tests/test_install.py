@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "install.py"
@@ -15,10 +16,19 @@ sys.modules[spec.name] = install_script
 spec.loader.exec_module(install_script)
 
 
+@contextmanager
+def temporary_directory_or_skip(testcase: unittest.TestCase):
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            yield Path(tmpdir)
+    except (FileNotFoundError, PermissionError) as exc:
+        testcase.skipTest(f"temporary directories unavailable in this environment: {exc}")
+
+
 class InstallScriptTests(unittest.TestCase):
     def test_load_marketplace_accepts_list_root(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "marketplace.json"
+        with temporary_directory_or_skip(self) as tmpdir:
+            path = tmpdir / "marketplace.json"
             path.write_text(json.dumps([{"name": "local-plugins", "plugins": []}]))
             document = install_script.load_marketplace(path)
         self.assertIsInstance(document, list)
