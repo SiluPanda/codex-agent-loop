@@ -36,13 +36,13 @@ The installer:
 
 ### 3) Terminal example
 
-Run the guided demo from inside Codex:
+Run a real task from inside Codex:
 
 ```text
-$agent-loop --demo
+$agent-loop 10m example task
 ```
 
-Animated end-to-end demo:
+Animated Codex CLI UX:
 
 ![Codex Agent Loop demo GIF](docs/assets/agent-loop-demo.gif)
 
