@@ -66,12 +66,6 @@ $agent-loop --demo
 $agent-loop 10m fix the failing tests and verify the result
 ```
 
-Direct runner outside Codex:
-
-```text
-python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py --doctor
-```
-
 Current public Codex builds do not reliably surface plugin-defined slash
 commands. This repo still includes `commands/run.md` for builds that do, but if
 `/agent-loop:run` is unrecognized, use `$agent-loop` instead.
@@ -125,7 +119,13 @@ The CLI flags stay:
 
 ## Final demo
 
-### Codex chat demo
+### Terminal example
+
+Run the guided demo from inside Codex:
+
+```text
+$agent-loop --demo
+```
 
 Animated end-to-end demo:
 
@@ -164,7 +164,6 @@ Write example:
 ### Choose your entrypoint
 
 - **Inside Codex:** use `$agent-loop ...`
-- **Outside Codex:** use `python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py ...`
 - **Optional slash command:** if your Codex build exposes plugin-defined slash commands, `/agent-loop:run ...` is equivalent
 
 ### Recommended first-run flow
@@ -256,55 +255,6 @@ $agent-loop 5t inspect this workspace and report what files exist. do not modify
 
 ```text
 $agent-loop 5t --approval-mode never create a file named hello.txt containing exactly hello from agent-loop
-```
-
-## Terminal demo
-
-If you want to verify the runner outside Codex first, this is the fastest path.
-
-### 1) Install locally
-
-```bash
-python3 scripts/install.py
-```
-
-### 2) Run doctor
-
-```text
-$ python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py --doctor
-Codex Agent Loop doctor
-Installed plugin copy: yes (~/.codex/plugins/agent-loop)
-Marketplace entry: yes (~/.agents/plugins/marketplace.json)
-Recommended Codex entrypoint: $agent-loop
-Plugin slash command: /agent-loop:run
-Selected backend: codex exec fallback
-Next step: python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py --demo
-```
-
-### 3) Run the safe onboarding demo
-
-```text
-$ python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py --demo
-Codex Agent Loop onboarding demo
-This first run is safe and read-only.
-
-Status: completed
-Stop reason: codex_exec_fallback
-Turns used: 1/3
-Run dir: ~/.codex/agent-loop/runs/<timestamp>-<id>
-
-Final answer:
-- inspected the workspace read-only
-- made no file changes
-```
-
-### 4) Run a real task
-
-```bash
-python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py \
-  10m \
-  --approval-mode on-write \
-  "Fix the failing tests and verify the result"
 ```
 
 ## Docs
