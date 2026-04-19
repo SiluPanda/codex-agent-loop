@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "agent_loop.py"
 spec = importlib.util.spec_from_file_location("agent_loop", SCRIPT)
@@ -32,6 +34,28 @@ class AgentLoopTests(unittest.TestCase):
         diff = "@@\n+hello\n+world"
         created = agent_loop.render_created_file(diff)
         self.assertEqual(created, "hello\nworld")
+
+    def test_backend_report_prefers_fallback_without_api_key(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(agent_loop, "read_api_key_from_auth_json", return_value=None):
+                with mock.patch.object(agent_loop.shutil, "which", return_value="/usr/local/bin/codex"):
+                    with mock.patch.object(agent_loop, "OpenAI", None):
+                        report = agent_loop.build_backend_report()
+        self.assertEqual(report["backend"], "codex-exec")
+        self.assertFalse(report["resume_supported"])
+
+    def test_task_from_args_uses_demo_default_task(self) -> None:
+        args = agent_loop.argparse.Namespace(
+            task=None,
+            prompt=[],
+            resume=None,
+            doctor=False,
+            demo=True,
+        )
+        with mock.patch.object(agent_loop.sys, "stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = True
+            task = agent_loop.task_from_args(args)
+        self.assertEqual(task, agent_loop.DEMO_TASK)
 
 
 if __name__ == "__main__":

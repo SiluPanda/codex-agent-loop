@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import uuid
@@ -31,7 +32,12 @@ APPROVAL_MODES = ("never", "on-write", "always")
 REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 RUNS_DIR = Path.home() / ".codex" / "agent-loop" / "runs"
 AUTH_JSON = Path.home() / ".codex" / "auth.json"
+MARKETPLACE_JSON = Path.home() / ".agents" / "plugins" / "marketplace.json"
+INSTALLED_PLUGIN_DIR = Path.home() / ".codex" / "plugins" / "codex-agent-loop"
 PLUGIN_SCRIPT = Path(__file__).resolve()
+PLUGIN_ROOT = PLUGIN_SCRIPT.parents[1]
+DOCTOR_SCHEMA_VERSION = 1
+DEMO_TASK = "Inspect this workspace and report what files exist. Do not modify anything."
 
 SAFE_COMMANDS = {
     "pwd",
@@ -133,6 +139,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Approve and execute the pending tool calls stored in --resume once.",
     )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Diagnose auth, backend, install, and marketplace status without running a task.",
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run a guided first-run demo using a safe read-only inspection task.",
+    )
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
@@ -158,11 +174,13 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit a machine-readable final summary JSON object.",
+        help="Emit machine-readable JSON instead of the human-oriented summary.",
     )
     args = parser.parse_args(argv)
     if args.max_turns < 1:
         parser.error("--max-turns must be >= 1")
+    if args.doctor and (args.resume or args.approve_pending):
+        parser.error("--doctor cannot be combined with --resume or --approve-pending")
     return args
 
 
@@ -208,7 +226,14 @@ def normalize_workspace(path: str) -> Path:
     return root
 
 
+def build_demo_task() -> str:
+    return DEMO_TASK
+
+
 def task_from_args(args: argparse.Namespace) -> str:
+    if args.doctor:
+        return ""
+
     parts: list[str] = []
     if args.task:
         parts.append(args.task)
@@ -219,6 +244,8 @@ def task_from_args(args: argparse.Namespace) -> str:
         if stdin_text:
             parts.append(stdin_text)
     task = "\n".join(part for part in parts if part).strip()
+    if not task and args.demo:
+        return build_demo_task()
     if not task and not args.resume:
         raise LoopError("Provide a task via --task, positional prompt text, stdin, or --resume.")
     return task
@@ -509,6 +536,10 @@ def write_state(path: Path, state: dict[str, Any]) -> None:
     path.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def quoted_script_command() -> str:
+    return f"python3 {shlex.quote(str(PLUGIN_SCRIPT))}"
+
+
 def print_pause_message(state_path: Path, pending_calls: list[dict[str, Any]]) -> None:
     print("\nLoop paused for approval.")
     print(f"State file: {state_path}")
@@ -521,10 +552,7 @@ def print_pause_message(state_path: Path, pending_calls: list[dict[str, Any]]) -
             print("- Pending shell commands:")
             for command in commands:
                 print(f"  - {command}")
-    print(
-        "Resume with: "
-        f"python3 {PLUGIN_SCRIPT} --resume {state_path} --approve-pending"
-    )
+    print("Resume with: " f"{quoted_script_command()} --resume {shlex.quote(str(state_path))} --approve-pending")
 
 
 def build_initial_input(task: str, workspace_root: Path, approval_mode: str, max_turns: int) -> str:
@@ -538,6 +566,189 @@ def build_initial_input(task: str, workspace_root: Path, approval_mode: str, max
         {task}
         """
     ).strip()
+
+
+def backend_label(backend: str) -> str:
+    if backend == "responses":
+        return "OpenAI Responses API"
+    if backend == "codex-exec":
+        return "codex exec fallback"
+    return backend
+
+
+def find_api_key_source() -> str:
+    if os.environ.get("OPENAI_API_KEY"):
+        return "environment"
+    if read_api_key_from_auth_json():
+        return "~/.codex/auth.json"
+    return "none"
+
+
+def has_git_repo(workspace_root: Path) -> bool:
+    proc = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(workspace_root),
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
+def marketplace_contains_plugin(path: Path = MARKETPLACE_JSON) -> bool:
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return False
+
+    if isinstance(data, dict):
+        plugins = data.get("plugins", [])
+        return isinstance(plugins, list) and any(
+            isinstance(plugin, dict) and plugin.get("name") == "codex-agent-loop" for plugin in plugins
+        )
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            plugins = item.get("plugins", [])
+            if isinstance(plugins, list) and any(
+                isinstance(plugin, dict) and plugin.get("name") == "codex-agent-loop" for plugin in plugins
+            ):
+                return True
+    return False
+
+
+def path_is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def build_backend_report() -> dict[str, Any]:
+    api_key_source = find_api_key_source()
+    codex_path = shutil.which("codex")
+    openai_package_available = OpenAI is not None
+
+    if openai_package_available and api_key_source != "none":
+        backend = "responses"
+    elif codex_path:
+        backend = "codex-exec"
+    else:
+        backend = "unavailable"
+
+    report = {
+        "backend": backend,
+        "backend_label": backend_label(backend),
+        "openai_package_available": openai_package_available,
+        "openai_import_error": str(IMPORT_ERROR) if IMPORT_ERROR else "",
+        "api_key_source": api_key_source,
+        "codex_available": bool(codex_path),
+        "codex_path": codex_path or "",
+        "resume_supported": backend == "responses",
+        "approval_mode_always_supported": backend == "responses",
+        "backend_note": "",
+    }
+    if backend == "responses":
+        report["backend_note"] = f"Using OpenAI Responses API because an API key was found in {api_key_source}."
+    elif backend == "codex-exec":
+        report["backend_note"] = (
+            "Using codex exec fallback because no OPENAI_API_KEY was found. "
+            "Resume/approval state and approval_mode=always are unavailable in this mode."
+        )
+    else:
+        report["backend_note"] = (
+            "No usable backend found. Install Codex or set OPENAI_API_KEY, then re-run --doctor."
+        )
+    return report
+
+
+def build_doctor_report(cwd: str) -> dict[str, Any]:
+    backend = build_backend_report()
+    try:
+        workspace_root = normalize_workspace(cwd)
+        workspace_error = ""
+    except Exception as exc:
+        workspace_root = Path(cwd).expanduser().resolve()
+        workspace_error = str(exc)
+
+    installed_plugin_present = INSTALLED_PLUGIN_DIR.exists()
+    marketplace_present = MARKETPLACE_JSON.exists()
+    marketplace_has_plugin = marketplace_contains_plugin(MARKETPLACE_JSON)
+
+    if backend["backend"] == "unavailable":
+        next_step = "Set OPENAI_API_KEY or install Codex, then re-run --doctor."
+    elif not installed_plugin_present or not marketplace_has_plugin:
+        next_step = f"python3 {shlex.quote(str(PLUGIN_ROOT / 'scripts' / 'install.py'))}"
+    else:
+        next_step = f"{quoted_script_command()} --demo"
+
+    return {
+        "schema_version": DOCTOR_SCHEMA_VERSION,
+        "generated_at": now_ts(),
+        "workspace_root": str(workspace_root),
+        "workspace_error": workspace_error,
+        "current_script_path": str(PLUGIN_SCRIPT),
+        "current_script_is_installed_copy": path_is_within(PLUGIN_SCRIPT, INSTALLED_PLUGIN_DIR),
+        "installed_plugin_path": str(INSTALLED_PLUGIN_DIR),
+        "installed_plugin_present": installed_plugin_present,
+        "marketplace_path": str(MARKETPLACE_JSON),
+        "marketplace_present": marketplace_present,
+        "marketplace_contains_plugin": marketplace_has_plugin,
+        "backend": backend["backend"],
+        "backend_label": backend["backend_label"],
+        "backend_note": backend["backend_note"],
+        "openai_package_available": backend["openai_package_available"],
+        "openai_import_error": backend["openai_import_error"],
+        "api_key_source": backend["api_key_source"],
+        "codex_available": backend["codex_available"],
+        "codex_path": backend["codex_path"],
+        "resume_supported": backend["resume_supported"],
+        "approval_mode_always_supported": backend["approval_mode_always_supported"],
+        "recommended_next_step": next_step,
+    }
+
+
+def print_doctor_report(report: dict[str, Any]) -> None:
+    print("Codex Agent Loop doctor")
+    print(f"Workspace: {report['workspace_root']}")
+    if report.get("workspace_error"):
+        print(f"Workspace check: {report['workspace_error']}")
+    print(f"Current script: {report['current_script_path']}")
+    print(
+        "Installed plugin copy: "
+        f"{'yes' if report['installed_plugin_present'] else 'no'} ({report['installed_plugin_path']})"
+    )
+    print(
+        "Marketplace entry: "
+        f"{'yes' if report['marketplace_contains_plugin'] else 'no'} ({report['marketplace_path']})"
+    )
+    print(f"Codex executable: {'yes' if report['codex_available'] else 'no'}")
+    print(f"OpenAI Python package: {'yes' if report['openai_package_available'] else 'no'}")
+    if report.get("openai_import_error"):
+        print(f"OpenAI import error: {report['openai_import_error']}")
+    api_key_source = report.get("api_key_source", "none")
+    print(f"API key source: {api_key_source if api_key_source != 'none' else 'not found'}")
+    print(f"Selected backend: {report['backend_label']}")
+    print(f"Resume approvals: {'supported' if report['resume_supported'] else 'unavailable'}")
+    print(
+        "approval_mode=always: "
+        f"{'supported' if report['approval_mode_always_supported'] else 'unavailable'}"
+    )
+    print(f"Note: {report['backend_note']}")
+    print(f"Next step: {report['recommended_next_step']}")
+
+
+def print_backend_banner(report: dict[str, Any]) -> None:
+    print(f"Backend: {report['backend_label']}")
+    if report["backend"] == "responses":
+        print(f"Auth: API key from {report['api_key_source']}")
+    elif report["backend"] == "codex-exec":
+        print("Auth: local Codex login fallback (no OPENAI_API_KEY found)")
+        print("Limits: resume approvals unavailable; approval_mode=always unavailable.")
+    print()
 
 
 def run_loop(
@@ -561,6 +772,10 @@ def run_loop(
     responses_jsonl = run_dir / "responses.jsonl"
     events_jsonl = run_dir / "events.jsonl"
     state_path = run_dir / "state.json"
+
+    last_text = resume_state.get("last_response_excerpt", "") if resume_state else ""
+    changed_paths: list[str] = list(resume_state.get("files_changed", [])) if resume_state else []
+    verification_commands: list[str] = list(resume_state.get("verification_commands", [])) if resume_state else []
 
     if resume_state:
         previous_response_id = resume_state["previous_response_id"]
@@ -608,10 +823,6 @@ def run_loop(
         initial_task = task
         input_items = [build_initial_input(task, workspace_root, approval_mode, max_turns)]
 
-    last_text = resume_state.get("last_response_excerpt", "") if resume_state else ""
-    changed_paths: list[str] = list(resume_state.get("files_changed", [])) if resume_state else []
-    verification_commands: list[str] = list(resume_state.get("verification_commands", [])) if resume_state else []
-
     while turns_used < max_turns:
         turns_used += 1
         response = client.responses.create(
@@ -634,6 +845,7 @@ def run_loop(
             summary = {
                 "status": "completed",
                 "stop_reason": "completed",
+                "backend": "responses",
                 "run_dir": str(run_dir),
                 "state_path": str(state_path),
                 "turns_used": turns_used,
@@ -655,6 +867,7 @@ def run_loop(
             state = {
                 "schema_version": 1,
                 "status": "paused_for_approval",
+                "backend": "responses",
                 "updated_at": now_ts(),
                 "run_dir": str(run_dir),
                 "state_path": str(state_path),
@@ -710,6 +923,7 @@ def run_loop(
     summary = {
         "status": "max_turns_reached",
         "stop_reason": "max_turns_reached",
+        "backend": "responses",
         "run_dir": str(run_dir),
         "state_path": str(state_path),
         "turns_used": turns_used,
@@ -759,16 +973,6 @@ def create_run_dir(runs_dir: Path) -> Path:
     run_dir = runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
-
-
-def has_git_repo(workspace_root: Path) -> bool:
-    proc = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        cwd=str(workspace_root),
-        capture_output=True,
-        text=True,
-    )
-    return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
 def build_codex_exec_prompt(task: str, workspace_root: Path, max_turns: int, approval_mode: str) -> str:
@@ -887,12 +1091,48 @@ def run_codex_exec_loop(
     return summary
 
 
+def print_demo_intro(workspace_root: Path) -> None:
+    print("Codex Agent Loop onboarding demo")
+    print(f"Workspace: {workspace_root}")
+    print("This first run is safe and read-only.")
+    print()
+
+
+def print_demo_next_steps() -> None:
+    demo_write_dir = Path(tempfile.mkdtemp(prefix="codex-agent-loop-demo-"))
+    script = quoted_script_command()
+    print("\nQuickstart complete.")
+    print("Next commands to try:")
+    print(f"1) Setup check:\n   {script} --doctor")
+    print(
+        "2) Tiny write demo in a throwaway directory:\n"
+        f"   {script} --cwd {shlex.quote(str(demo_write_dir))} --approval-mode never "
+        '"Create a file named hello.txt containing exactly hello from codex-agent-loop."'
+    )
+    print(
+        "3) Real repo task:\n"
+        f'   {script} --max-turns 8 --approval-mode on-write "Fix the failing tests and verify the result"'
+    )
+
+
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     runs_dir = Path(args.runs_dir).expanduser().resolve()
+    workspace_root = Path(args.cwd).expanduser().resolve()
 
     try:
+        if args.doctor:
+            report = build_doctor_report(args.cwd)
+            if args.json:
+                print(json.dumps(report, ensure_ascii=False))
+            else:
+                print_doctor_report(report)
+            return 0 if report["backend"] != "unavailable" else 1
+
         task = task_from_args(args)
+        if args.demo and args.max_turns == DEFAULT_MAX_TURNS:
+            args.max_turns = 3
+
         if args.resume:
             state_path = Path(args.resume).expanduser().resolve()
             resume_state = json.loads(state_path.read_text())
@@ -900,12 +1140,37 @@ def main(argv: Sequence[str]) -> int:
             workspace_root = normalize_workspace(resume_state.get("workspace_root", args.cwd))
         else:
             resume_state = None
-            run_dir = create_run_dir(runs_dir)
             workspace_root = normalize_workspace(args.cwd)
-        try:
-            client = ensure_openai_client()
-        except Exception:
+            run_dir = create_run_dir(runs_dir)
+
+        backend_report = build_backend_report()
+        if not args.json:
+            if args.demo:
+                print_demo_intro(workspace_root)
+            print_backend_banner(backend_report)
+
+        client: OpenAI | None
+        if backend_report["backend"] == "responses":
+            try:
+                client = ensure_openai_client()
+            except Exception as exc:
+                if backend_report["codex_available"] and not (args.resume or args.approve_pending):
+                    client = None
+                    backend_report = {
+                        **backend_report,
+                        "backend": "codex-exec",
+                        "backend_label": backend_label("codex-exec"),
+                        "backend_note": (
+                            "Responses backend initialization failed; falling back to codex exec. "
+                            f"Reason: {exc}"
+                        ),
+                    }
+                else:
+                    raise
+        elif backend_report["backend"] == "codex-exec":
             client = None
+        else:
+            raise LoopError("No usable backend found. Run with --doctor for setup guidance.")
 
         if client is None:
             if args.resume or args.approve_pending:
@@ -954,6 +1219,8 @@ def main(argv: Sequence[str]) -> int:
         print(json.dumps(summary, ensure_ascii=False))
     else:
         print_human_summary(summary)
+        if args.demo:
+            print_demo_next_steps()
     return 0
 
 

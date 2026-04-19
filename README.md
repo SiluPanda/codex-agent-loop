@@ -4,6 +4,76 @@ A local Codex plugin that gives Codex a Claude-Code-style loop runner for bounde
 
 GitHub: https://github.com/SiluPanda/codex-agent-loop
 
+## 60-second quickstart
+
+### 1) Install it
+
+Clone anywhere, then run the installer:
+
+```bash
+git clone https://github.com/SiluPanda/codex-agent-loop.git
+cd codex-agent-loop
+python3 scripts/install.py
+```
+
+The installer:
+
+- copies the plugin into `~/.codex/plugins/codex-agent-loop`
+- merges the marketplace entry into `~/.agents/plugins/marketplace.json`
+- backs up the previous marketplace file if one exists
+
+### 2) Check your setup
+
+```bash
+python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py --doctor
+```
+
+This tells you:
+
+- which backend will run
+- whether `OPENAI_API_KEY` was found
+- whether resume/approval-state is supported
+- whether Codex and the marketplace entry are installed correctly
+
+### 3) Get your first success
+
+Run the guided demo:
+
+```bash
+python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py --demo
+```
+
+This first demo is safe and read-only.
+
+### 4) Run a real task
+
+```bash
+python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py \
+  --max-turns 8 \
+  --approval-mode on-write \
+  "Fix the failing tests and verify the result"
+```
+
+## What success looks like
+
+You should see:
+
+- a backend banner
+- a status summary
+- a run directory like `~/.codex/agent-loop/runs/<timestamp>-<id>/`
+
+## Friendly approval modes
+
+- `safe` = `on-write` (default)
+- `hands-off` = `never`
+- `review-everything` = `always`
+
+The CLI flags stay:
+
+- `--approval-mode on-write`
+- `--approval-mode never`
+- `--approval-mode always`
+
 ## Preview
 
 Animated write-flow demo:
@@ -14,6 +84,10 @@ CLI help:
 
 ![Codex Agent Loop help screenshot](docs/assets/agent-loop-help.png)
 
+Doctor output:
+
+![Codex Agent Loop doctor screenshot](docs/assets/agent-loop-doctor.png)
+
 Read-only inspection example:
 
 ![Codex Agent Loop read-only screenshot](docs/assets/agent-loop-readonly.png)
@@ -22,101 +96,56 @@ Write example:
 
 ![Codex Agent Loop write screenshot](docs/assets/agent-loop-write.png)
 
-It ships with:
+## What it includes
 
-- a `/agent-loop` command
-- a `codex-agent-loop` skill
-- a reusable Python runner
+- `/agent-loop` command
+- `codex-agent-loop` skill
+- `scripts/agent_loop.py` runner
+- `scripts/install.py` installer
+- `--doctor` environment check
+- `--demo` onboarding run
 - local run logs and resumable approval state
 
-The primary backend uses the OpenAI Responses API with `shell` and `apply_patch` tools. If `OPENAI_API_KEY` is not available, it automatically falls back to `codex exec`, so it still works with a ChatGPT-authenticated Codex install.
+## Backends
 
-## Features
+### 1) OpenAI Responses API
 
-- bounded loop execution with `--max-turns`
-- approval controls with `--approval-mode`
-- model selection with `--model`
-- reasoning control with `--reasoning-effort`
-- resumable approval pauses in Responses API mode
-- local logs under `~/.codex/agent-loop/runs/`
+Used when an API key is available.
 
-## Repo layout
+Supports:
 
-```text
-.codex-plugin/plugin.json
-commands/agent-loop.md
-skills/codex-agent-loop/SKILL.md
-scripts/agent_loop.py
-tests/test_agent_loop.py
-```
+- multi-turn tool loops
+- resumable approval state
+- `approval_mode=always`
 
-## Installation
+### 2) `codex exec` fallback
 
-### Option 1: personal Codex plugin install
+Used when no API key is available but Codex is installed and authenticated.
 
-Copy or clone this repo into:
+Supports:
 
-```bash
-~/.codex/plugins/codex-agent-loop
-```
+- normal loop execution
+- model selection
+- reasoning effort selection
+- ChatGPT-authenticated Codex installs
 
-Example:
+Limitations:
 
-```bash
-git clone https://github.com/SiluPanda/codex-agent-loop.git \
-  ~/.codex/plugins/codex-agent-loop
-```
+- `approval_mode=always` is unavailable
+- `--resume ... --approve-pending` is unavailable
 
-Then add it to your personal marketplace file:
+## Common commands
 
-```json
-{
-  "name": "my-local-plugins",
-  "interface": { "displayName": "My Local Plugins" },
-  "plugins": [
-    {
-      "name": "codex-agent-loop",
-      "source": {
-        "source": "local",
-        "path": "./.codex/plugins/codex-agent-loop"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Coding"
-    }
-  ]
-}
-```
-
-Save that as:
+### Setup diagnosis
 
 ```bash
-~/.agents/plugins/marketplace.json
+python3 scripts/agent_loop.py --doctor
 ```
 
-Then restart Codex and install/enable the plugin from `/plugins`.
-
-### Option 2: run the loop runner directly
-
-You can also run the script directly from this repo:
+### Guided demo
 
 ```bash
-python3 scripts/agent_loop.py --help
-```
-
-## Usage
-
-### Basic
-
-```bash
-python3 scripts/agent_loop.py \
-  --max-turns 8 \
-  --approval-mode on-write \
-  --model gpt-5.4 \
-  --reasoning-effort high \
-  "Fix the failing tests and verify the result"
+python3 scripts/agent_loop.py --demo
 ```
 
 ### Read-only inspection
@@ -128,11 +157,12 @@ python3 scripts/agent_loop.py \
   "Inspect this workspace and report what files exist. Do not modify anything."
 ```
 
-### Allow writes without pausing
+### Tiny write demo
 
 ```bash
 python3 scripts/agent_loop.py \
   --approval-mode never \
+  --cwd /tmp/codex-agent-loop-demo \
   "Create a file named hello.txt containing exactly hello from codex-agent-loop."
 ```
 
@@ -142,106 +172,21 @@ python3 scripts/agent_loop.py \
 python3 scripts/agent_loop.py --json "Summarize this repo"
 ```
 
-## Approval modes
+## Docs
 
-- `on-write` (default): auto-run read-only shell commands, pause before write-like shell commands and patches
-- `always`: pause before every shell command and every patch
-- `never`: never pause; execute all tool calls automatically
+- [Troubleshooting](docs/troubleshooting.md)
+- [Architecture](docs/architecture.md)
+- [Development](docs/development.md)
+- [Manual install](docs/manual-install.md)
 
-## Resuming a paused run
+## Repo layout
 
-If the Responses backend pauses for approval, resume it with:
-
-```bash
-python3 scripts/agent_loop.py \
-  --resume ~/.codex/agent-loop/runs/<run-id>/state.json \
-  --approve-pending
+```text
+.codex-plugin/plugin.json
+commands/agent-loop.md
+docs/
+scripts/agent_loop.py
+scripts/install.py
+skills/codex-agent-loop/SKILL.md
+tests/
 ```
-
-Each run stores a `state.json` file in its run directory.
-
-## Auth behavior
-
-The runner tries, in order:
-
-1. `OPENAI_API_KEY` from the environment
-2. `~/.codex/auth.json`
-3. fallback execution through `codex exec`
-
-## Backend modes
-
-### 1) OpenAI Responses backend
-
-Used when an API key is available.
-
-Supports:
-
-- multi-turn tool loops
-- resumable approval state
-- shell tool execution
-- patch application via `apply_patch`
-
-### 2) `codex exec` fallback backend
-
-Used when no API key is available but Codex is installed and authenticated.
-
-Supports:
-
-- normal one-shot loop-style execution
-- model selection
-- reasoning effort selection
-- direct use with a ChatGPT-authenticated Codex install
-
-Limitations:
-
-- `approval_mode=always` is not supported
-- `--resume ... --approve-pending` is not supported
-- approval behavior is best-effort prompt guidance rather than host-enforced tool gating
-
-## Slash command and skill
-
-After installation, the plugin provides:
-
-- `/agent-loop`
-- `codex-agent-loop` skill
-
-Example prompts:
-
-- “Run an agent loop on this task with an 8-turn cap.”
-- “Iterate until the bug is fixed, but pause before write actions.”
-- “Resume the last paused coding loop and approve the pending patch.”
-
-## Output and logs
-
-Run artifacts are stored in:
-
-```bash
-~/.codex/agent-loop/runs/<timestamp>-<id>/
-```
-
-Typical contents:
-
-- `state.json`
-- `responses.jsonl`
-- `events.jsonl`
-- `codex_exec.stdout.jsonl`
-- `codex_exec.stderr.txt`
-
-## Development
-
-Run the tests:
-
-```bash
-python3 -m unittest discover -s tests -p 'test_*.py'
-```
-
-Check syntax:
-
-```bash
-python3 -m py_compile scripts/agent_loop.py tests/test_agent_loop.py
-```
-
-## Notes
-
-- This plugin is intentionally Claude-Code-like in workflow, not Anthropic-SDK-compatible.
-- The fallback backend is designed to keep the plugin useful even when Codex is authenticated without an API key.

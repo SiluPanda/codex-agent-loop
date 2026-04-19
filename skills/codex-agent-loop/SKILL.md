@@ -36,6 +36,17 @@ python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py --max-turns 8 --
 
 If `OPENAI_API_KEY` is unavailable, the runner automatically falls back to `codex exec`.
 
+## Onboarding helpers
+
+- `--doctor` explains which backend will run and whether setup is complete.
+- `--demo` runs a safe read-only first-run example and suggests next commands.
+
+Approval modes in plain English:
+
+- `on-write` = safe
+- `never` = hands-off
+- `always` = review-everything
+
 ## Approval behavior
 
 - `on-write` auto-runs read-only shell inspection commands.
