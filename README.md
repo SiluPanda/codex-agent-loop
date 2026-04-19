@@ -20,7 +20,7 @@ The installer:
 
 - copies the plugin into `~/.codex/plugins/codex-agent-loop`
 - merges the marketplace entry into `~/.agents/plugins/marketplace.json`
-- backs up the previous marketplace file if one exists
+- backs up the previous plugin install and marketplace file if they exist
 
 ### 2) Check your setup
 
