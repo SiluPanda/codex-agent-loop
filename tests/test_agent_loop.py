@@ -28,6 +28,12 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(args.max_seconds, 600)
         self.assertEqual(args.prompt, ["fix", "the", "tests"])
 
+    def test_parse_args_supports_budget_shorthand_with_intermixed_flags(self) -> None:
+        args = agent_loop.parse_args(["10m", "--approval-mode", "on-write", "fix", "the", "tests"])
+        self.assertEqual(args.max_seconds, 600)
+        self.assertEqual(args.approval_mode, "on-write")
+        self.assertEqual(args.prompt, ["fix", "the", "tests"])
+
     def test_parse_args_shorthand_does_not_override_explicit_max_turns(self) -> None:
         args = agent_loop.parse_args(["--max-turns=12", "10m", "fix", "the", "tests"])
         self.assertEqual(args.max_turns, 12)
@@ -37,8 +43,29 @@ class AgentLoopTests(unittest.TestCase):
     def test_shell_command_read_only_detection(self) -> None:
         self.assertTrue(agent_loop.shell_command_is_read_only("git status"))
         self.assertTrue(agent_loop.shell_command_is_read_only("rg TODO src"))
+        self.assertTrue(agent_loop.shell_command_is_read_only("rg TODO src | head"))
         self.assertFalse(agent_loop.shell_command_is_read_only("python3 script.py"))
         self.assertFalse(agent_loop.shell_command_is_read_only("echo hi > out.txt"))
+        self.assertFalse(agent_loop.shell_command_is_read_only("echo $(touch should_not_run)"))
+        self.assertFalse(agent_loop.shell_command_is_read_only("echo `touch should_not_run`"))
+        self.assertFalse(agent_loop.shell_command_is_read_only("find . -exec rm {} \\;"))
+        self.assertFalse(agent_loop.shell_command_is_read_only("git branch -D stale-branch"))
+
+    def test_execute_shell_call_truncates_output(self) -> None:
+        call = agent_loop.SimpleNamespace(
+            {
+                "call_id": "call-1",
+                "action": {
+                    "commands": ['python3 -c \'print("x" * 120)\''],
+                    "max_output_length": 10,
+                },
+            }
+        )
+        output, log = agent_loop.execute_shell_call(call, Path(__file__).resolve().parents[1])
+        stdout = output["output"][0]["stdout"]
+        self.assertEqual(output["max_output_length"], 10)
+        self.assertLessEqual(len(stdout), 10)
+        self.assertEqual(stdout, log["commands"][0]["stdout"])
 
     def test_update_diff_application(self) -> None:
         original = "def fib(n):\n    if n <= 1:\n        return n\n    return fib(n-1) + fib(n-2)\n"
@@ -61,6 +88,46 @@ class AgentLoopTests(unittest.TestCase):
                         report = agent_loop.build_backend_report()
         self.assertEqual(report["backend"], "codex-exec")
         self.assertFalse(report["resume_supported"])
+        self.assertIn("read-only sandbox", report["backend_note"])
+
+    def test_run_codex_exec_loop_uses_read_only_sandbox_for_on_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(agent_loop.shutil, "which", return_value="/usr/local/bin/codex"):
+                with mock.patch.object(agent_loop, "has_git_repo", return_value=True):
+                    with mock.patch.object(agent_loop.subprocess, "run") as run:
+                        run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+                        agent_loop.run_codex_exec_loop(
+                            task="inspect",
+                            workspace_root=Path(__file__).resolve().parents[1],
+                            run_dir=Path(tmpdir),
+                            model=agent_loop.DEFAULT_MODEL,
+                            reasoning_effort=agent_loop.DEFAULT_REASONING_EFFORT,
+                            approval_mode="on-write",
+                            max_turns=3,
+                            max_seconds=60,
+                        )
+        cmd = run.call_args.args[0]
+        self.assertIn("read-only", cmd)
+        self.assertNotIn("workspace-write", cmd)
+
+    def test_run_codex_exec_loop_uses_workspace_write_for_never(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(agent_loop.shutil, "which", return_value="/usr/local/bin/codex"):
+                with mock.patch.object(agent_loop, "has_git_repo", return_value=True):
+                    with mock.patch.object(agent_loop.subprocess, "run") as run:
+                        run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+                        agent_loop.run_codex_exec_loop(
+                            task="inspect",
+                            workspace_root=Path(__file__).resolve().parents[1],
+                            run_dir=Path(tmpdir),
+                            model=agent_loop.DEFAULT_MODEL,
+                            reasoning_effort=agent_loop.DEFAULT_REASONING_EFFORT,
+                            approval_mode="never",
+                            max_turns=3,
+                            max_seconds=60,
+                        )
+        cmd = run.call_args.args[0]
+        self.assertIn("workspace-write", cmd)
 
     def test_task_from_args_uses_demo_default_task(self) -> None:
         args = agent_loop.argparse.Namespace(

@@ -90,6 +90,49 @@ SAFE_GIT_SUBCOMMANDS = {
     "ls-files",
     "grep",
 }
+SAFE_GIT_BRANCH_FLAGS = {
+    "-a",
+    "--all",
+    "-r",
+    "--remotes",
+    "--show-current",
+    "-v",
+    "-vv",
+    "--verbose",
+    "--list",
+    "--color",
+    "--no-color",
+    "--column",
+    "--omit-empty",
+}
+UNSAFE_SHELL_TOKENS = {
+    "$",
+    "(",
+    ")",
+    ";",
+    "&",
+    "&&",
+    "||",
+    ">",
+    ">>",
+    "<",
+    "<<",
+    "<<<",
+    "<(",
+    ">(",
+    "|&",
+}
+FIND_WRITE_FLAGS = {
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-fprint",
+    "-fprint0",
+    "-fprintf",
+    "-fls",
+}
 WRITE_HINTS = (
     ">",
     ">>",
@@ -228,7 +271,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Emit machine-readable JSON instead of the human-oriented summary.",
     )
-    args = parser.parse_args(argv)
+    parse = parser.parse_intermixed_args if hasattr(parser, "parse_intermixed_args") else parser.parse_args
+    args = parse(argv)
     args._explicit_max_turns = argv_has_flag(argv, "--max-turns")
     args._explicit_max_seconds = argv_has_flag(argv, "--max-seconds")
     args.budget_shorthand = None
@@ -375,15 +419,50 @@ def shell_command_is_read_only(command: str) -> bool:
         if hint in normalized:
             return False
     try:
-        parts = shlex.split(command, posix=True)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        parts = list(lexer)
     except Exception:
         return False
     if not parts:
         return True
+    pipeline: list[list[str]] = [[]]
+    for token in parts:
+        if token == "|":
+            if not pipeline[-1]:
+                return False
+            pipeline.append([])
+            continue
+        if token in UNSAFE_SHELL_TOKENS or "`" in token:
+            return False
+        pipeline[-1].append(token)
+    if not pipeline[-1]:
+        return False
+    return all(simple_command_is_read_only(segment) for segment in pipeline)
+
+
+def simple_command_is_read_only(parts: Sequence[str]) -> bool:
+    if not parts:
+        return True
     cmd = parts[0]
     if cmd == "git":
-        return len(parts) >= 2 and parts[1] in SAFE_GIT_SUBCOMMANDS
+        return git_command_is_read_only(parts)
+    if cmd == "find" and any(flag in FIND_WRITE_FLAGS for flag in parts[1:]):
+        return False
     return cmd in SAFE_COMMANDS
+
+
+def git_command_is_read_only(parts: Sequence[str]) -> bool:
+    if len(parts) < 2:
+        return False
+    subcommand = parts[1]
+    if subcommand not in SAFE_GIT_SUBCOMMANDS:
+        return False
+    if subcommand != "branch":
+        return True
+    if len(parts) == 2:
+        return True
+    return all(arg in SAFE_GIT_BRANCH_FLAGS for arg in parts[2:])
 
 
 def shell_call_is_read_only(commands: Iterable[str]) -> bool:
@@ -548,10 +627,23 @@ def execute_apply_patch(call: Any, workspace_root: Path) -> tuple[dict[str, Any]
     raise LoopError(f"Unsupported apply_patch operation type: {op_type}")
 
 
+def truncate_output(text: str, max_output_length: int | None) -> str:
+    if max_output_length is None or len(text) <= max_output_length:
+        return text
+    if max_output_length <= 0:
+        return ""
+    suffix = "...[truncated]"
+    if max_output_length <= len(suffix):
+        return text[:max_output_length]
+    return text[: max_output_length - len(suffix)] + suffix
+
+
 def execute_shell_call(call: Any, workspace_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     commands = list(getattr(getattr(call, "action", None), "commands", []) or [])
     timeout_ms = getattr(getattr(call, "action", None), "timeout_ms", None) or 120000
     max_output_length = getattr(getattr(call, "action", None), "max_output_length", None)
+    if max_output_length is not None:
+        max_output_length = max(0, int(max_output_length))
 
     outputs: list[dict[str, Any]] = []
     executed: list[dict[str, Any]] = []
@@ -573,6 +665,8 @@ def execute_shell_call(call: Any, workspace_root: Path) -> tuple[dict[str, Any],
             stderr = exc.stderr or ""
             outcome = {"type": "timeout"}
 
+        stdout = truncate_output(stdout, max_output_length)
+        stderr = truncate_output(stderr, max_output_length)
         outputs.append({"stdout": stdout, "stderr": stderr, "outcome": outcome})
         executed.append({"command": command, "stdout": stdout, "stderr": stderr, "outcome": outcome})
 
@@ -730,7 +824,8 @@ def build_backend_report() -> dict[str, Any]:
     elif backend == "codex-exec":
         report["backend_note"] = (
             "Using codex exec fallback because no OPENAI_API_KEY was found. "
-            "Resume/approval state and approval_mode=always are unavailable in this mode."
+            "Resume/approval state and approval_mode=always are unavailable in this mode. "
+            "approval_mode=on-write runs in a read-only sandbox; use approval_mode=never to allow writes."
         )
     else:
         report["backend_note"] = (
@@ -829,7 +924,10 @@ def print_backend_banner(report: dict[str, Any]) -> None:
         print(f"Auth: API key from {report['api_key_source']}")
     elif report["backend"] == "codex-exec":
         print("Auth: local Codex login fallback (no OPENAI_API_KEY found)")
-        print("Limits: resume approvals unavailable; approval_mode=always unavailable.")
+        print(
+            "Limits: resume approvals unavailable; approval_mode=always unavailable; "
+            "approval_mode=on-write is read-only in fallback mode."
+        )
     print()
 
 
@@ -1165,8 +1263,9 @@ def build_codex_exec_prompt(
     approval_note = ""
     if approval_mode == "on-write":
         approval_note = (
-            "- Prefer read-only inspection first.\n"
-            "- If you decide a write is necessary, briefly state the intended write before doing it.\n"
+            "- The host sandbox is read-only in this mode, so do not make filesystem changes.\n"
+            "- If a write is required, explain that the user should rerun with --approval-mode never "
+            "or with an OPENAI_API_KEY-backed Responses backend.\n"
         )
     elif approval_mode == "never":
         approval_note = "- Proceed without waiting for extra approval prompts.\n"
@@ -1241,7 +1340,8 @@ def run_codex_exec_loop(
     ]
     if not has_git_repo(workspace_root):
         cmd.append("--skip-git-repo-check")
-    cmd.extend(["-s", "workspace-write"])
+    sandbox = "workspace-write" if approval_mode == "never" else "read-only"
+    cmd.extend(["-s", sandbox])
     cmd.append(prompt)
 
     started_at_unix = time.time()
