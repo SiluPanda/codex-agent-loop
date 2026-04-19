@@ -55,11 +55,17 @@ python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py $ARGUMENTS
    - ask whether to resume with `--approve-pending`
 10. If the runner completes, report:
    - stop reason
+   - backend
    - turns used
    - files changed
    - verification commands
    - final answer
 11. Do not claim any command or patch executed unless the runner output shows it.
+
+Notes:
+
+- Agent Loop is bounded; it should stop when the task is complete or when it hits a budget/pause/error.
+- In fallback mode, a stop reason like `completed_via_fallback` means the run completed through `codex exec`; it is not an error.
 
 ## Default flags
 

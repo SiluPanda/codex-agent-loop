@@ -4,11 +4,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import textwrap
 import time
 import uuid
@@ -90,6 +90,49 @@ SAFE_GIT_SUBCOMMANDS = {
     "ls-files",
     "grep",
 }
+SAFE_GIT_BRANCH_FLAGS = {
+    "-a",
+    "--all",
+    "-r",
+    "--remotes",
+    "--show-current",
+    "-v",
+    "-vv",
+    "--verbose",
+    "--list",
+    "--color",
+    "--no-color",
+    "--column",
+    "--omit-empty",
+}
+UNSAFE_SHELL_TOKENS = {
+    "$",
+    "(",
+    ")",
+    ";",
+    "&",
+    "&&",
+    "||",
+    ">",
+    ">>",
+    "<",
+    "<<",
+    "<<<",
+    "<(",
+    ">(",
+    "|&",
+}
+FIND_WRITE_FLAGS = {
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-fprint",
+    "-fprint0",
+    "-fprintf",
+    "-fls",
+}
 WRITE_HINTS = (
     ">",
     ">>",
@@ -133,6 +176,10 @@ class ApprovalPause(SystemExit):
 class PatchHunk:
     before: list[str]
     after: list[str]
+    old_start: int | None = None
+
+
+HUNK_HEADER_RE = re.compile(r"^@@(?: -(?P<old_start>\d+)(?:,\d+)? \+\d+(?:,\d+)?)? @@")
 
 
 def parse_budget_shorthand(token: str) -> tuple[str, int] | None:
@@ -228,7 +275,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Emit machine-readable JSON instead of the human-oriented summary.",
     )
-    args = parser.parse_args(argv)
+    parse = parser.parse_intermixed_args if hasattr(parser, "parse_intermixed_args") else parser.parse_args
+    args = parse(argv)
     args._explicit_max_turns = argv_has_flag(argv, "--max-turns")
     args._explicit_max_seconds = argv_has_flag(argv, "--max-seconds")
     args.budget_shorthand = None
@@ -297,7 +345,7 @@ def task_from_args(args: argparse.Namespace) -> str:
         parts.append(args.task)
     if args.prompt:
         parts.append(" ".join(args.prompt).strip())
-    if not sys.stdin.isatty():
+    if not args.resume and not sys.stdin.isatty():
         stdin_text = sys.stdin.read().strip()
         if stdin_text:
             parts.append(stdin_text)
@@ -369,21 +417,74 @@ def response_tool_calls(response: Any) -> list[Any]:
     return calls
 
 
+def normalize_subprocess_stream(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 def shell_command_is_read_only(command: str) -> bool:
     normalized = f" {command.strip()} "
     for hint in WRITE_HINTS:
         if hint in normalized:
             return False
     try:
-        parts = shlex.split(command, posix=True)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        parts = list(lexer)
     except Exception:
         return False
     if not parts:
         return True
+    pipeline: list[list[str]] = [[]]
+    for token in parts:
+        if token == "|":
+            if not pipeline[-1]:
+                return False
+            pipeline.append([])
+            continue
+        if token in UNSAFE_SHELL_TOKENS or "`" in token:
+            return False
+        pipeline[-1].append(token)
+    if not pipeline[-1]:
+        return False
+    return all(simple_command_is_read_only(segment) for segment in pipeline)
+
+
+def simple_command_is_read_only(parts: Sequence[str]) -> bool:
+    if not parts:
+        return True
     cmd = parts[0]
     if cmd == "git":
-        return len(parts) >= 2 and parts[1] in SAFE_GIT_SUBCOMMANDS
+        return git_command_is_read_only(parts)
+    if cmd == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in parts[1:]):
+        return False
+    if cmd == "awk":
+        for index, arg in enumerate(parts[1:], start=1):
+            if arg == "-i" and index + 1 < len(parts) and parts[index + 1] == "inplace":
+                return False
+    if cmd == "perl" and any(re.fullmatch(r"-[A-Za-z]*i[A-Za-z]*", arg) for arg in parts[1:]):
+        return False
+    if cmd == "find" and any(flag in FIND_WRITE_FLAGS for flag in parts[1:]):
+        return False
     return cmd in SAFE_COMMANDS
+
+
+def git_command_is_read_only(parts: Sequence[str]) -> bool:
+    if len(parts) < 2:
+        return False
+    subcommand = parts[1]
+    if subcommand not in SAFE_GIT_SUBCOMMANDS:
+        return False
+    if subcommand != "branch":
+        return True
+    if len(parts) == 2:
+        return True
+    return all(arg in SAFE_GIT_BRANCH_FLAGS for arg in parts[2:])
 
 
 def shell_call_is_read_only(commands: Iterable[str]) -> bool:
@@ -413,19 +514,22 @@ def safe_workspace_path(workspace_root: Path, relative_path: str) -> Path:
 
 
 def parse_headerless_hunks(diff_text: str) -> list[PatchHunk]:
-    lines = diff_text.replace("\r\n", "\n").split("\n")
+    lines = diff_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     hunks: list[PatchHunk] = []
     current_before: list[str] | None = None
     current_after: list[str] | None = None
+    current_old_start: int | None = None
 
     for line in lines:
         if line.startswith(("--- ", "+++ ")) or line == "\\ No newline at end of file":
             continue
         if line.startswith("@@"):
             if current_before is not None:
-                hunks.append(PatchHunk(current_before, current_after or []))
+                hunks.append(PatchHunk(current_before, current_after or [], current_old_start))
             current_before = []
             current_after = []
+            match = HUNK_HEADER_RE.match(line)
+            current_old_start = int(match.group("old_start")) if match and match.group("old_start") else None
             continue
         if line and line[0] in {" ", "+", "-"}:
             if current_before is None:
@@ -441,7 +545,7 @@ def parse_headerless_hunks(diff_text: str) -> list[PatchHunk]:
             continue
 
     if current_before is not None:
-        hunks.append(PatchHunk(current_before, current_after or []))
+        hunks.append(PatchHunk(current_before, current_after or [], current_old_start))
     return hunks
 
 
@@ -455,17 +559,45 @@ def find_subsequence(haystack: list[str], needle: list[str], start: int = 0) -> 
     return None
 
 
+def detect_line_ending(text: str) -> str:
+    if "\r\n" in text:
+        return "\r\n"
+    if "\r" in text:
+        return "\r"
+    return "\n"
+
+
+def read_text_preserve_newlines(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def write_text_preserve_newlines(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+
+
 def apply_update_diff(original_text: str, diff_text: str) -> str:
     hunks = parse_headerless_hunks(diff_text)
     if not hunks:
         raise LoopError("Could not parse update_file diff into hunks.")
 
-    lines = original_text.replace("\r\n", "\n").split("\n")
-    original_had_trailing_newline = original_text.endswith("\n")
+    line_ending = detect_line_ending(original_text)
+    lines = original_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    original_had_trailing_newline = original_text.endswith(("\n", "\r"))
     cursor = 0
+    line_offset = 0
 
     for hunk in hunks:
-        idx = find_subsequence(lines, hunk.before, cursor)
+        idx: int | None = None
+        if hunk.old_start is not None:
+            preferred_idx = max(0, hunk.old_start - 1 + line_offset)
+            if lines[preferred_idx : preferred_idx + len(hunk.before)] == hunk.before:
+                idx = preferred_idx
+            else:
+                idx = find_subsequence(lines, hunk.before, preferred_idx)
+        if idx is None:
+            idx = find_subsequence(lines, hunk.before, cursor)
         if idx is None:
             idx = find_subsequence(lines, hunk.before, 0)
         if idx is None:
@@ -474,10 +606,11 @@ def apply_update_diff(original_text: str, diff_text: str) -> str:
         end = idx + len(hunk.before)
         lines[idx:end] = hunk.after
         cursor = idx + len(hunk.after)
+        line_offset += len(hunk.after) - len(hunk.before)
 
-    rendered = "\n".join(lines)
-    if original_had_trailing_newline and rendered and not rendered.endswith("\n"):
-        rendered += "\n"
+    rendered = line_ending.join(lines)
+    if original_had_trailing_newline and rendered and not rendered.endswith(("\n", "\r")):
+        rendered += line_ending
     return rendered
 
 
@@ -520,7 +653,7 @@ def execute_apply_patch(call: Any, workspace_root: Path) -> tuple[dict[str, Any]
         if target.exists():
             raise LoopError(f"create_file target already exists: {rel_path}")
         rendered = render_created_file(diff_text)
-        target.write_text(rendered, encoding="utf-8")
+        write_text_preserve_newlines(target, rendered)
         log = {"tool": "apply_patch", "operation": op_type, "path": rel_path, "status": "completed"}
         output = {
             "type": "apply_patch_call_output",
@@ -533,9 +666,9 @@ def execute_apply_patch(call: Any, workspace_root: Path) -> tuple[dict[str, Any]
     if op_type == "update_file":
         if not target.exists():
             raise LoopError(f"update_file target does not exist: {rel_path}")
-        original = target.read_text(encoding="utf-8")
+        original = read_text_preserve_newlines(target)
         rendered = apply_update_diff(original, diff_text)
-        target.write_text(rendered, encoding="utf-8")
+        write_text_preserve_newlines(target, rendered)
         log = {"tool": "apply_patch", "operation": op_type, "path": rel_path, "status": "completed"}
         output = {
             "type": "apply_patch_call_output",
@@ -548,10 +681,23 @@ def execute_apply_patch(call: Any, workspace_root: Path) -> tuple[dict[str, Any]
     raise LoopError(f"Unsupported apply_patch operation type: {op_type}")
 
 
+def truncate_output(text: str, max_output_length: int | None) -> str:
+    if max_output_length is None or len(text) <= max_output_length:
+        return text
+    if max_output_length <= 0:
+        return ""
+    suffix = "...[truncated]"
+    if max_output_length <= len(suffix):
+        return text[:max_output_length]
+    return text[: max_output_length - len(suffix)] + suffix
+
+
 def execute_shell_call(call: Any, workspace_root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     commands = list(getattr(getattr(call, "action", None), "commands", []) or [])
     timeout_ms = getattr(getattr(call, "action", None), "timeout_ms", None) or 120000
     max_output_length = getattr(getattr(call, "action", None), "max_output_length", None)
+    if max_output_length is not None:
+        max_output_length = max(0, int(max_output_length))
 
     outputs: list[dict[str, Any]] = []
     executed: list[dict[str, Any]] = []
@@ -565,14 +711,16 @@ def execute_shell_call(call: Any, workspace_root: Path) -> tuple[dict[str, Any],
                 text=True,
                 timeout=timeout_ms / 1000,
             )
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
+            stdout = normalize_subprocess_stream(proc.stdout)
+            stderr = normalize_subprocess_stream(proc.stderr)
             outcome = {"type": "exit", "exit_code": int(proc.returncode)}
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout or ""
-            stderr = exc.stderr or ""
+            stdout = normalize_subprocess_stream(exc.stdout)
+            stderr = normalize_subprocess_stream(exc.stderr)
             outcome = {"type": "timeout"}
 
+        stdout = truncate_output(stdout, max_output_length)
+        stderr = truncate_output(stderr, max_output_length)
         outputs.append({"stdout": stdout, "stderr": stderr, "outcome": outcome})
         executed.append({"command": command, "stdout": stdout, "stderr": stderr, "outcome": outcome})
 
@@ -730,7 +878,8 @@ def build_backend_report() -> dict[str, Any]:
     elif backend == "codex-exec":
         report["backend_note"] = (
             "Using codex exec fallback because no OPENAI_API_KEY was found. "
-            "Resume/approval state and approval_mode=always are unavailable in this mode."
+            "Resume/approval state and approval_mode=always are unavailable in this mode. "
+            "approval_mode=on-write runs in a read-only sandbox; use approval_mode=never to allow writes."
         )
     else:
         report["backend_note"] = (
@@ -829,7 +978,10 @@ def print_backend_banner(report: dict[str, Any]) -> None:
         print(f"Auth: API key from {report['api_key_source']}")
     elif report["backend"] == "codex-exec":
         print("Auth: local Codex login fallback (no OPENAI_API_KEY found)")
-        print("Limits: resume approvals unavailable; approval_mode=always unavailable.")
+        print(
+            "Limits: resume approvals unavailable; approval_mode=always unavailable; "
+            "approval_mode=on-write is read-only in fallback mode."
+        )
     print()
 
 
@@ -1129,12 +1281,16 @@ class SimpleNamespace:
 def print_human_summary(summary: dict[str, Any]) -> None:
     print(f"Status: {summary['status']}")
     print(f"Stop reason: {summary['stop_reason']}")
+    if summary.get("backend"):
+        print(f"Backend: {summary['backend']}")
     print(f"Turns used: {summary['turns_used']}/{summary['max_turns']}")
     if summary.get("max_seconds") is not None:
         print(f"Time budget: {summary['max_seconds']}s")
     if summary.get("elapsed_seconds") is not None:
         print(f"Elapsed: {summary['elapsed_seconds']}s")
     print(f"Run dir: {summary['run_dir']}")
+    if summary.get("note"):
+        print(f"Note: {summary['note']}")
     if summary.get("files_changed"):
         print("Files changed:")
         for path in summary["files_changed"]:
@@ -1165,8 +1321,9 @@ def build_codex_exec_prompt(
     approval_note = ""
     if approval_mode == "on-write":
         approval_note = (
-            "- Prefer read-only inspection first.\n"
-            "- If you decide a write is necessary, briefly state the intended write before doing it.\n"
+            "- The host sandbox is read-only in this mode, so do not make filesystem changes.\n"
+            "- If a write is required, explain that the user should rerun with --approval-mode never "
+            "or with an OPENAI_API_KEY-backed Responses backend.\n"
         )
     elif approval_mode == "never":
         approval_note = "- Proceed without waiting for extra approval prompts.\n"
@@ -1194,8 +1351,11 @@ def build_codex_exec_prompt(
     ).strip()
 
 
-def parse_codex_exec_jsonl(output: str) -> str:
+def parse_codex_exec_telemetry(output: str) -> dict[str, Any]:
+    turns_used = 0
+    commands: list[str] = []
     last_text = ""
+
     for line in output.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -1204,11 +1364,79 @@ def parse_codex_exec_jsonl(output: str) -> str:
             event = json.loads(line)
         except Exception:
             continue
-        if event.get("type") == "item.completed":
-            item = event.get("item", {})
-            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
-                last_text = item["text"]
-    return last_text
+        if event.get("type") == "turn.started":
+            turns_used += 1
+            continue
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item", {})
+        if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+            last_text = item["text"]
+        elif item.get("type") == "command_execution" and isinstance(item.get("command"), str):
+            commands.append(item["command"])
+
+    return {
+        "final_text": last_text,
+        "turns_used": turns_used,
+        "verification_commands": commands,
+    }
+
+
+def parse_codex_exec_jsonl(output: str) -> str:
+    telemetry = parse_codex_exec_telemetry(output)
+    return str(telemetry["final_text"])
+
+
+def parse_git_status_porcelain(output: str) -> list[str]:
+    changed_paths: list[str] = []
+    for line in output.splitlines():
+        if not line:
+            continue
+        path = line[3:] if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        path = path.strip()
+        if path:
+            changed_paths.append(path)
+    return sorted(dict.fromkeys(changed_paths))
+
+
+def collect_changed_files(workspace_root: Path) -> list[str]:
+    if not has_git_repo(workspace_root):
+        return []
+    proc = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(workspace_root),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return []
+    return parse_git_status_porcelain(normalize_subprocess_stream(proc.stdout))
+
+
+def snapshot_workspace_files(workspace_root: Path) -> dict[str, tuple[int, int]]:
+    snapshot: dict[str, tuple[int, int]] = {}
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        dirnames[:] = [name for name in dirnames if name != ".git"]
+        base = Path(dirpath)
+        for filename in filenames:
+            path = base / filename
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if not path.is_file():
+                continue
+            snapshot[str(path.relative_to(workspace_root))] = (int(stat.st_size), int(stat.st_mtime_ns))
+    return snapshot
+
+
+def diff_workspace_snapshots(
+    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]
+) -> list[str]:
+    changed_paths = [path for path in sorted(set(before) | set(after)) if before.get(path) != after.get(path)]
+    return changed_paths
 
 
 def run_codex_exec_loop(
@@ -1241,10 +1469,12 @@ def run_codex_exec_loop(
     ]
     if not has_git_repo(workspace_root):
         cmd.append("--skip-git-repo-check")
-    cmd.extend(["-s", "workspace-write"])
+    sandbox = "workspace-write" if approval_mode == "never" else "read-only"
+    cmd.extend(["-s", sandbox])
     cmd.append(prompt)
 
     started_at_unix = time.time()
+    before_snapshot = snapshot_workspace_files(workspace_root)
     timed_out = False
     try:
         proc = subprocess.run(
@@ -1254,19 +1484,21 @@ def run_codex_exec_loop(
             text=True,
             timeout=max_seconds,
         )
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
+        stdout = normalize_subprocess_stream(proc.stdout)
+        stderr = normalize_subprocess_stream(proc.stderr)
         returncode = proc.returncode
     except subprocess.TimeoutExpired as exc:
         timed_out = True
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
+        stdout = normalize_subprocess_stream(exc.stdout)
+        stderr = normalize_subprocess_stream(exc.stderr)
         returncode = 124
 
+    after_snapshot = snapshot_workspace_files(workspace_root)
     (run_dir / "codex_exec.stdout.jsonl").write_text(stdout, encoding="utf-8")
     (run_dir / "codex_exec.stderr.txt").write_text(stderr, encoding="utf-8")
 
-    final_text = parse_codex_exec_jsonl(stdout)
+    telemetry = parse_codex_exec_telemetry(stdout)
+    final_text = str(telemetry["final_text"])
     if not timed_out and returncode != 0 and not final_text:
         raise LoopError(
             "codex exec fallback failed"
@@ -1275,11 +1507,11 @@ def run_codex_exec_loop(
 
     summary = {
         "status": "max_time_reached" if timed_out else ("completed" if returncode == 0 else "completed_with_warnings"),
-        "stop_reason": "max_time_reached" if timed_out else "codex_exec_fallback",
+        "stop_reason": "max_time_reached" if timed_out else "completed_via_fallback",
         "backend": "codex-exec",
         "run_dir": str(run_dir),
         "state_path": str(run_dir / "state.json"),
-        "turns_used": 1,
+        "turns_used": max(1, int(telemetry["turns_used"])),
         "max_turns": max_turns,
         "max_seconds": max_seconds,
         "elapsed_seconds": compute_elapsed_seconds(started_at_unix),
@@ -1288,8 +1520,15 @@ def run_codex_exec_loop(
         "approval_mode": approval_mode,
         "workspace_root": str(workspace_root),
         "task": task,
-        "files_changed": [],
-        "verification_commands": [],
+        "files_changed": diff_workspace_snapshots(before_snapshot, after_snapshot),
+        "verification_commands": list(telemetry["verification_commands"]),
+        "note": (
+            "Completed via the codex exec fallback backend. "
+            "In fallback mode, Agent Loop runs one codex exec session and may finish before max_turns "
+            "if the task appears complete."
+            if not timed_out
+            else ""
+        ),
         "final_answer": (
             final_text
             or (f"Stopped after reaching the {max_seconds}-second time budget." if timed_out else stderr.strip())
@@ -1306,15 +1545,20 @@ def print_demo_intro(workspace_root: Path) -> None:
     print()
 
 
+def suggested_demo_write_dir() -> Path:
+    return Path.home() / ".codex" / "agent-loop" / "demo-write-example"
+
+
 def print_demo_next_steps() -> None:
-    demo_write_dir = Path(tempfile.mkdtemp(prefix="agent-loop-demo-"))
+    demo_write_dir = suggested_demo_write_dir()
+    quoted_demo_write_dir = shlex.quote(str(demo_write_dir))
     script = quoted_script_command()
     print("\nQuickstart complete.")
     print("Next commands to try:")
     print(f"1) Setup check:\n   {script} --doctor")
     print(
         "2) Tiny write demo in a throwaway directory:\n"
-        f"   {script} --cwd {shlex.quote(str(demo_write_dir))} --approval-mode never "
+        f"   mkdir -p {quoted_demo_write_dir} && {script} --cwd {quoted_demo_write_dir} --approval-mode never "
         '"Create a file named hello.txt containing exactly hello from agent-loop."'
     )
     print(
@@ -1357,10 +1601,6 @@ def main(argv: Sequence[str]) -> int:
             run_dir = create_run_dir(runs_dir)
 
         backend_report = build_backend_report()
-        if not args.json:
-            if args.demo:
-                print_demo_intro(workspace_root)
-            print_backend_banner(backend_report)
 
         client: OpenAI | None
         if backend_report["backend"] == "responses":
@@ -1384,6 +1624,11 @@ def main(argv: Sequence[str]) -> int:
             client = None
         else:
             raise LoopError("No usable backend found. Run with --doctor for setup guidance.")
+
+        if not args.json:
+            if args.demo:
+                print_demo_intro(workspace_root)
+            print_backend_banner(backend_report)
 
         if client is None:
             if args.resume or args.approve_pending:

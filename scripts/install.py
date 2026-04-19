@@ -67,23 +67,48 @@ def default_marketplace_document() -> dict[str, Any]:
     }
 
 
-def load_marketplace(path: Path) -> dict[str, Any]:
+def normalize_marketplace_document(document: dict[str, Any]) -> dict[str, Any]:
+    plugins = document.get("plugins")
+    if plugins is None:
+        document["plugins"] = []
+    elif not isinstance(plugins, list):
+        raise RuntimeError("Unsupported marketplace format: 'plugins' must be a list.")
+    document.setdefault("name", "local-plugins")
+    document.setdefault("interface", {"displayName": "Local Plugins"})
+    return document
+
+
+def load_marketplace(path: Path) -> dict[str, Any] | list[Any]:
     if not path.exists():
         return default_marketplace_document()
     data = json.loads(path.read_text())
-    if not isinstance(data, dict):
-        raise RuntimeError(f"Unsupported marketplace format in {path}: expected a JSON object.")
-    plugins = data.get("plugins")
-    if plugins is None:
-        data["plugins"] = []
-    elif not isinstance(plugins, list):
-        raise RuntimeError(f"Unsupported marketplace format in {path}: 'plugins' must be a list.")
-    data.setdefault("name", "local-plugins")
-    data.setdefault("interface", {"displayName": "Local Plugins"})
-    return data
+    if isinstance(data, dict):
+        try:
+            return normalize_marketplace_document(data)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Unsupported marketplace format in {path}: {exc}") from exc
+    if isinstance(data, list):
+        normalized: list[Any] = []
+        for item in data:
+            if isinstance(item, dict):
+                try:
+                    normalized.append(normalize_marketplace_document(item))
+                except RuntimeError as exc:
+                    raise RuntimeError(f"Unsupported marketplace format in {path}: {exc}") from exc
+            else:
+                normalized.append(item)
+        return normalized
+    raise RuntimeError(f"Unsupported marketplace format in {path}: expected a JSON object or list.")
 
 
-def merge_plugin_entry(document: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+def merge_plugin_entry(document: dict[str, Any] | list[Any], entry: dict[str, Any]) -> dict[str, Any] | list[Any]:
+    if isinstance(document, list):
+        return merge_plugin_entry_list(document, entry)
+    return merge_plugin_entry_document(document, entry)
+
+
+def merge_plugin_entry_document(document: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    document = normalize_marketplace_document(document)
     plugins = document.setdefault("plugins", [])
     assert isinstance(plugins, list)
     merged_plugins: list[Any] = []
@@ -99,6 +124,37 @@ def merge_plugin_entry(document: dict[str, Any], entry: dict[str, Any]) -> dict[
         merged_plugins.append(entry)
     document["plugins"] = merged_plugins
     return document
+
+
+def marketplace_document_contains_plugin(document: dict[str, Any]) -> bool:
+    plugins = document.get("plugins", [])
+    return isinstance(plugins, list) and any(
+        isinstance(plugin, dict) and plugin_name_matches(plugin.get("name")) for plugin in plugins
+    )
+
+
+def merge_plugin_entry_list(documents: list[Any], entry: dict[str, Any]) -> list[Any]:
+    merged = list(documents)
+    target_index: int | None = None
+
+    for index, item in enumerate(merged):
+        if isinstance(item, dict) and marketplace_document_contains_plugin(item):
+            target_index = index
+            break
+    if target_index is None:
+        for index, item in enumerate(merged):
+            if isinstance(item, dict) and item.get("name") == "local-plugins":
+                target_index = index
+                break
+    if target_index is None:
+        merged.append(default_marketplace_document())
+        target_index = len(merged) - 1
+
+    target = merged[target_index]
+    if not isinstance(target, dict):
+        raise RuntimeError("Unsupported marketplace format: expected a JSON object document.")
+    merged[target_index] = merge_plugin_entry_document(target, entry)
+    return merged
 
 
 def backup_existing_path(path: Path, dry_run: bool) -> Path | None:
@@ -145,7 +201,7 @@ def archive_legacy_plugin_dirs(target: Path, dry_run: bool) -> list[Path]:
     return backups
 
 
-def write_marketplace(path: Path, document: dict[str, Any], dry_run: bool) -> Path | None:
+def write_marketplace(path: Path, document: dict[str, Any] | list[Any], dry_run: bool) -> Path | None:
     backup = backup_existing_path(path, dry_run)
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
