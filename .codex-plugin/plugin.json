@@ -5,7 +5,7 @@
   "author": {
     "name": "silupanda"
   },
-  "homepage": "https://developers.openai.com/codex/plugins/build",
+  "homepage": "https://github.com/SiluPanda/codex-agent-loop",
   "license": "MIT",
   "keywords": [
     "codex",
@@ -26,7 +26,7 @@
       "Read",
       "Write"
     ],
-    "websiteURL": "https://developers.openai.com/codex/plugins/build",
+    "websiteURL": "https://github.com/SiluPanda/codex-agent-loop",
     "privacyPolicyURL": "https://openai.com/policies/privacy-policy/",
     "termsOfServiceURL": "https://openai.com/policies/terms-of-use/",
     "defaultPrompt": [

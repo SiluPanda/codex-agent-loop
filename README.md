@@ -2,6 +2,8 @@
 
 A local Codex plugin that gives Codex a Claude-Code-style loop runner for bounded coding tasks.
 
+GitHub: https://github.com/SiluPanda/codex-agent-loop
+
 It ships with:
 
 - a `/agent-loop` command
@@ -38,6 +40,13 @@ Copy or clone this repo into:
 
 ```bash
 ~/.codex/plugins/codex-agent-loop
+```
+
+Example:
+
+```bash
+git clone https://github.com/SiluPanda/codex-agent-loop.git \
+  ~/.codex/plugins/codex-agent-loop
 ```
 
 Then add it to your personal marketplace file:
