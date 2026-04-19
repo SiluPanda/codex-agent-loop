@@ -20,6 +20,12 @@ Use this skill for multi-step coding tasks that need a bounded agent loop instea
 - `--model gpt-5.4`
 - `--reasoning-effort high`
 
+Shorthand budgets are also supported:
+
+- `10m` = 10 minutes
+- `1h` = 1 hour
+- `5t` = 5 turns
+
 ## Invocation
 
 Prefer the explicit slash command:
@@ -28,18 +34,17 @@ Prefer the explicit slash command:
 /agent-loop <task>
 ```
 
-Or run the script directly:
+Or with a shorthand budget:
 
-```bash
-python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py --max-turns 8 --approval-mode on-write --model gpt-5.4 --reasoning-effort high "<task>"
+```text
+/agent-loop 10m <task>
 ```
-
-If `OPENAI_API_KEY` is unavailable, the runner automatically falls back to `codex exec`.
 
 ## Onboarding helpers
 
-- `--doctor` explains which backend will run and whether setup is complete.
+- `--doctor` checks that the plugin is installed and ready in Codex.
 - `--demo` runs a safe read-only first-run example and suggests next commands.
+- `10m`, `1h`, and `5t` work as shorthand budgets before the task text.
 
 Approval modes in plain English:
 

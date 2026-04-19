@@ -1,6 +1,6 @@
 ---
-description: Run a bounded, Claude-Code-style coding loop with onboarding helpers like --doctor and --demo.
-argument-hint: [task] [--max-turns N] [--approval-mode on-write|always|never] [--model MODEL] [--reasoning-effort low|medium|high|xhigh] [--resume STATE] [--approve-pending] [--doctor] [--demo]
+description: Run a bounded, Claude-Code-style coding loop with onboarding helpers like --doctor, --demo, and shorthand budgets like 10m.
+argument-hint: [10m|1h|5t] [task] [--max-turns N] [--max-seconds N] [--approval-mode on-write|always|never] [--model MODEL] [--reasoning-effort low|medium|high|xhigh] [--resume STATE] [--approve-pending] [--doctor] [--demo]
 allowed-tools: [Read, Bash]
 ---
 
@@ -31,26 +31,27 @@ The user invoked this command with: `$ARGUMENTS`
    - `on-write` = safe
    - `never` = hands-off
    - `always` = review-everything
-7. Run:
+7. If the first positional token looks like `10m`, `1h`, or `5t`, treat it as a shorthand budget:
+   - `m` = minutes
+   - `h` = hours
+   - `t` = turns
+8. Run:
 
 ```bash
 python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py $ARGUMENTS
 ```
 
-The runner prefers direct Responses API execution when an API key is available and otherwise falls back to `codex exec`.
-
-8. If the runner pauses for approval:
+9. If the runner pauses for approval:
    - summarize the pending command or patch
    - show the saved state path
    - ask whether to resume with `--approve-pending`
-9. If the runner completes, report:
-   - backend used
+10. If the runner completes, report:
    - stop reason
    - turns used
    - files changed
    - verification commands
    - final answer
-10. Do not claim any command or patch executed unless the runner output shows it.
+11. Do not claim any command or patch executed unless the runner output shows it.
 
 ## Default flags
 
@@ -58,3 +59,8 @@ The runner prefers direct Responses API execution when an API key is available a
 - `--approval-mode on-write`
 - `--model gpt-5.4`
 - `--reasoning-effort high`
+
+## Examples
+
+- `/agent-loop 10m fix the failing tests`
+- `/agent-loop 5t refactor the auth module`

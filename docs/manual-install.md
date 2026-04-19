@@ -40,8 +40,8 @@ Then:
 
 ## 4) Verify
 
-Run:
+Start a new thread in Codex and run:
 
-```bash
-python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py --doctor
+```text
+/agent-loop --doctor
 ```

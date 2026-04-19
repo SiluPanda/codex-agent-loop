@@ -127,6 +127,45 @@ class PatchHunk:
     after: list[str]
 
 
+def parse_budget_shorthand(token: str) -> tuple[str, int] | None:
+    value = token.strip().lower()
+    if len(value) < 2 or not value[:-1].isdigit():
+        return None
+    amount = int(value[:-1])
+    if amount < 1:
+        return None
+    unit = value[-1]
+    if unit == "t":
+        return ("max_turns", amount)
+    if unit == "s":
+        return ("max_seconds", amount)
+    if unit == "m":
+        return ("max_seconds", amount * 60)
+    if unit == "h":
+        return ("max_seconds", amount * 3600)
+    return None
+
+
+def apply_budget_shorthand(args: argparse.Namespace) -> argparse.Namespace:
+    prompt_parts = list(args.prompt or [])
+    if args.task or args.resume or args.doctor or not prompt_parts:
+        return args
+    if getattr(args, "_explicit_max_turns", False) or getattr(args, "_explicit_max_seconds", False):
+        return args
+    parsed = parse_budget_shorthand(prompt_parts[0])
+    if parsed is None:
+        return args
+    field, value = parsed
+    setattr(args, field, value)
+    args.prompt = prompt_parts[1:]
+    args.budget_shorthand = prompt_parts[0]
+    return args
+
+
+def argv_has_flag(argv: Sequence[str], name: str) -> bool:
+    return any(arg == name or arg.startswith(f"{name}=") for arg in argv)
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a bounded, resumable coding loop with OpenAI Responses shell/apply_patch tools."
@@ -150,6 +189,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Run a guided first-run demo using a safe read-only inspection task.",
     )
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
+    parser.add_argument(
+        "--max-seconds",
+        type=int,
+        help="Optional wall-clock budget in seconds. Shorthand aliases also work: 10m, 1h, 5t.",
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
         "--reasoning-effort",
@@ -177,8 +221,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Emit machine-readable JSON instead of the human-oriented summary.",
     )
     args = parser.parse_args(argv)
+    args._explicit_max_turns = argv_has_flag(argv, "--max-turns")
+    args._explicit_max_seconds = argv_has_flag(argv, "--max-seconds")
+    args.budget_shorthand = None
+    args = apply_budget_shorthand(args)
     if args.max_turns < 1:
         parser.error("--max-turns must be >= 1")
+    if args.max_seconds is not None and args.max_seconds < 1:
+        parser.error("--max-seconds must be >= 1")
     if args.doctor and (args.resume or args.approve_pending):
         parser.error("--doctor cannot be combined with --resume or --approve-pending")
     return args
@@ -251,17 +301,21 @@ def task_from_args(args: argparse.Namespace) -> str:
     return task
 
 
-def developer_instructions(workspace_root: Path, max_turns: int, approval_mode: str) -> str:
+def developer_instructions(
+    workspace_root: Path, max_turns: int, approval_mode: str, max_seconds: int | None = None
+) -> str:
+    time_budget_line = f"Max wall time: {max_seconds} seconds" if max_seconds else "Max wall time: none"
     return textwrap.dedent(
         f"""
         You are Codex Agent Loop, a persistent coding agent.
 
         Workspace root: {workspace_root}
         Max loop turns: {max_turns}
+        {time_budget_line}
         Approval mode: {approval_mode}
 
         Rules:
-        - Persist until the task is complete, you hit the turn cap, or the host pauses for approval.
+        - Persist until the task is complete, you hit the turn cap, hit the wall-time budget, or the host pauses for approval.
         - Use shell to inspect the workspace, run tests, and validate changes.
         - Use apply_patch to edit files when edits are necessary.
         - Never claim a command ran or a file changed unless you emitted the corresponding tool call.
@@ -555,12 +609,20 @@ def print_pause_message(state_path: Path, pending_calls: list[dict[str, Any]]) -
     print("Resume with: " f"{quoted_script_command()} --resume {shlex.quote(str(state_path))} --approve-pending")
 
 
-def build_initial_input(task: str, workspace_root: Path, approval_mode: str, max_turns: int) -> str:
+def build_initial_input(
+    task: str,
+    workspace_root: Path,
+    approval_mode: str,
+    max_turns: int,
+    max_seconds: int | None = None,
+) -> str:
+    time_budget = str(max_seconds) if max_seconds is not None else "none"
     return textwrap.dedent(
         f"""
         Workspace root: {workspace_root}
         Approval mode: {approval_mode}
         Max turns: {max_turns}
+        Max wall time seconds: {time_budget}
 
         Task:
         {task}
@@ -751,6 +813,49 @@ def print_backend_banner(report: dict[str, Any]) -> None:
     print()
 
 
+def compute_elapsed_seconds(started_at_unix: float) -> float:
+    return round(max(0.0, time.time() - started_at_unix), 2)
+
+
+def build_time_limit_summary(
+    *,
+    backend: str,
+    run_dir: Path,
+    state_path: Path,
+    turns_used: int,
+    max_turns: int,
+    max_seconds: int | None,
+    model: str,
+    reasoning_effort: str,
+    approval_mode: str,
+    workspace_root: Path,
+    task: str,
+    files_changed: list[str],
+    verification_commands: list[str],
+    final_answer: str,
+    started_at_unix: float,
+) -> dict[str, Any]:
+    return {
+        "status": "max_time_reached",
+        "stop_reason": "max_time_reached",
+        "backend": backend,
+        "run_dir": str(run_dir),
+        "state_path": str(state_path),
+        "turns_used": turns_used,
+        "max_turns": max_turns,
+        "max_seconds": max_seconds,
+        "elapsed_seconds": compute_elapsed_seconds(started_at_unix),
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "approval_mode": approval_mode,
+        "workspace_root": str(workspace_root),
+        "task": task,
+        "files_changed": sorted(set(files_changed)),
+        "verification_commands": verification_commands,
+        "final_answer": final_answer,
+    }
+
+
 def run_loop(
     client: OpenAI,
     *,
@@ -761,6 +866,7 @@ def run_loop(
     reasoning_effort: str,
     approval_mode: str,
     max_turns: int,
+    max_seconds: int | None = None,
     resume_state: dict[str, Any] | None = None,
     approve_pending: bool = False,
 ) -> dict[str, Any]:
@@ -768,7 +874,7 @@ def run_loop(
         {"type": "shell", "environment": {"type": "local"}},
         {"type": "apply_patch"},
     ]
-    instructions = developer_instructions(workspace_root, max_turns, approval_mode)
+    instructions = developer_instructions(workspace_root, max_turns, approval_mode, max_seconds)
     responses_jsonl = run_dir / "responses.jsonl"
     events_jsonl = run_dir / "events.jsonl"
     state_path = run_dir / "state.json"
@@ -776,6 +882,9 @@ def run_loop(
     last_text = resume_state.get("last_response_excerpt", "") if resume_state else ""
     changed_paths: list[str] = list(resume_state.get("files_changed", [])) if resume_state else []
     verification_commands: list[str] = list(resume_state.get("verification_commands", [])) if resume_state else []
+    started_at_unix = (
+        float(resume_state.get("started_at_unix", time.time())) if resume_state else time.time()
+    )
 
     if resume_state:
         previous_response_id = resume_state["previous_response_id"]
@@ -821,9 +930,29 @@ def run_loop(
         previous_response_id = None
         turns_used = 0
         initial_task = task
-        input_items = [build_initial_input(task, workspace_root, approval_mode, max_turns)]
+        input_items = [build_initial_input(task, workspace_root, approval_mode, max_turns, max_seconds)]
 
     while turns_used < max_turns:
+        if max_seconds is not None and time.time() - started_at_unix >= max_seconds:
+            summary = build_time_limit_summary(
+                backend="responses",
+                run_dir=run_dir,
+                state_path=state_path,
+                turns_used=turns_used,
+                max_turns=max_turns,
+                max_seconds=max_seconds,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                approval_mode=approval_mode,
+                workspace_root=workspace_root,
+                task=initial_task,
+                files_changed=changed_paths,
+                verification_commands=verification_commands,
+                final_answer=last_text or f"Stopped after reaching the {max_seconds}-second time budget.",
+                started_at_unix=started_at_unix,
+            )
+            write_state(state_path, {**summary, "updated_at": now_ts(), "started_at_unix": started_at_unix})
+            return summary
         turns_used += 1
         response = client.responses.create(
             model=model,
@@ -850,6 +979,8 @@ def run_loop(
                 "state_path": str(state_path),
                 "turns_used": turns_used,
                 "max_turns": max_turns,
+                "max_seconds": max_seconds,
+                "elapsed_seconds": compute_elapsed_seconds(started_at_unix),
                 "model": model,
                 "reasoning_effort": reasoning_effort,
                 "approval_mode": approval_mode,
@@ -859,7 +990,28 @@ def run_loop(
                 "verification_commands": verification_commands,
                 "final_answer": last_text,
             }
-            write_state(state_path, {**summary, "updated_at": now_ts()})
+            write_state(state_path, {**summary, "updated_at": now_ts(), "started_at_unix": started_at_unix})
+            return summary
+
+        if max_seconds is not None and time.time() - started_at_unix >= max_seconds:
+            summary = build_time_limit_summary(
+                backend="responses",
+                run_dir=run_dir,
+                state_path=state_path,
+                turns_used=turns_used,
+                max_turns=max_turns,
+                max_seconds=max_seconds,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                approval_mode=approval_mode,
+                workspace_root=workspace_root,
+                task=initial_task,
+                files_changed=changed_paths,
+                verification_commands=verification_commands,
+                final_answer=last_text or f"Stopped after reaching the {max_seconds}-second time budget.",
+                started_at_unix=started_at_unix,
+            )
+            write_state(state_path, {**summary, "updated_at": now_ts(), "started_at_unix": started_at_unix})
             return summary
 
         pending = [serialize_model(call) for call in calls if needs_approval(call, approval_mode)]
@@ -877,7 +1029,9 @@ def run_loop(
                 "reasoning_effort": reasoning_effort,
                 "approval_mode": approval_mode,
                 "max_turns": max_turns,
+                "max_seconds": max_seconds,
                 "turns_used": turns_used,
+                "started_at_unix": started_at_unix,
                 "previous_response_id": previous_response_id,
                 "last_response_excerpt": last_text,
                 "files_changed": sorted(set(changed_paths)),
@@ -928,6 +1082,8 @@ def run_loop(
         "state_path": str(state_path),
         "turns_used": turns_used,
         "max_turns": max_turns,
+        "max_seconds": max_seconds,
+        "elapsed_seconds": compute_elapsed_seconds(started_at_unix),
         "model": model,
         "reasoning_effort": reasoning_effort,
         "approval_mode": approval_mode,
@@ -937,7 +1093,7 @@ def run_loop(
         "verification_commands": verification_commands,
         "final_answer": last_text,
     }
-    write_state(state_path, {**summary, "updated_at": now_ts()})
+    write_state(state_path, {**summary, "updated_at": now_ts(), "started_at_unix": started_at_unix})
     return summary
 
 
@@ -954,6 +1110,10 @@ def print_human_summary(summary: dict[str, Any]) -> None:
     print(f"Status: {summary['status']}")
     print(f"Stop reason: {summary['stop_reason']}")
     print(f"Turns used: {summary['turns_used']}/{summary['max_turns']}")
+    if summary.get("max_seconds") is not None:
+        print(f"Time budget: {summary['max_seconds']}s")
+    if summary.get("elapsed_seconds") is not None:
+        print(f"Elapsed: {summary['elapsed_seconds']}s")
     print(f"Run dir: {summary['run_dir']}")
     if summary.get("files_changed"):
         print("Files changed:")
@@ -975,7 +1135,13 @@ def create_run_dir(runs_dir: Path) -> Path:
     return run_dir
 
 
-def build_codex_exec_prompt(task: str, workspace_root: Path, max_turns: int, approval_mode: str) -> str:
+def build_codex_exec_prompt(
+    task: str,
+    workspace_root: Path,
+    max_turns: int,
+    approval_mode: str,
+    max_seconds: int | None = None,
+) -> str:
     approval_note = ""
     if approval_mode == "on-write":
         approval_note = (
@@ -984,16 +1150,19 @@ def build_codex_exec_prompt(task: str, workspace_root: Path, max_turns: int, app
         )
     elif approval_mode == "never":
         approval_note = "- Proceed without waiting for extra approval prompts.\n"
+    time_note = f"Requested max wall time: {max_seconds} seconds" if max_seconds else "Requested max wall time: none"
     return textwrap.dedent(
         f"""
         You are running inside Codex Agent Loop fallback mode.
 
         Workspace root: {workspace_root}
         Requested max turns: {max_turns}
+        {time_note}
         Requested approval mode: {approval_mode}
 
         Important:
         - Treat the requested max turns as a strict budget for major inspect/edit/test phases.
+        - Respect the requested wall-time budget if one is present.
         - Prefer to finish within that budget.
         - If the task can be completed read-only, avoid writes entirely.
         - Verify any important result before concluding.
@@ -1031,13 +1200,14 @@ def run_codex_exec_loop(
     reasoning_effort: str,
     approval_mode: str,
     max_turns: int,
+    max_seconds: int | None = None,
 ) -> dict[str, Any]:
     if approval_mode == "always":
         raise LoopError("approval_mode=always is not supported in codex-exec fallback mode.")
     if shutil.which("codex") is None:
         raise LoopError("codex executable not found on PATH for fallback execution.")
 
-    prompt = build_codex_exec_prompt(task, workspace_root, max_turns, approval_mode)
+    prompt = build_codex_exec_prompt(task, workspace_root, max_turns, approval_mode, max_seconds)
     cmd = [
         "codex",
         "exec",
@@ -1054,30 +1224,45 @@ def run_codex_exec_loop(
     cmd.extend(["-s", "workspace-write"])
     cmd.append(prompt)
 
-    proc = subprocess.run(
-        cmd,
-        cwd=str(workspace_root),
-        capture_output=True,
-        text=True,
-    )
-    (run_dir / "codex_exec.stdout.jsonl").write_text(proc.stdout, encoding="utf-8")
-    (run_dir / "codex_exec.stderr.txt").write_text(proc.stderr, encoding="utf-8")
+    started_at_unix = time.time()
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(workspace_root),
+            capture_output=True,
+            text=True,
+            timeout=max_seconds,
+        )
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        returncode = proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        returncode = 124
 
-    final_text = parse_codex_exec_jsonl(proc.stdout)
-    if proc.returncode != 0 and not final_text:
+    (run_dir / "codex_exec.stdout.jsonl").write_text(stdout, encoding="utf-8")
+    (run_dir / "codex_exec.stderr.txt").write_text(stderr, encoding="utf-8")
+
+    final_text = parse_codex_exec_jsonl(stdout)
+    if not timed_out and returncode != 0 and not final_text:
         raise LoopError(
             "codex exec fallback failed"
-            + (f": {proc.stderr.strip()}" if proc.stderr.strip() else "")
+            + (f": {stderr.strip()}" if stderr.strip() else "")
         )
 
     summary = {
-        "status": "completed" if proc.returncode == 0 else "completed_with_warnings",
-        "stop_reason": "codex_exec_fallback",
+        "status": "max_time_reached" if timed_out else ("completed" if returncode == 0 else "completed_with_warnings"),
+        "stop_reason": "max_time_reached" if timed_out else "codex_exec_fallback",
         "backend": "codex-exec",
         "run_dir": str(run_dir),
         "state_path": str(run_dir / "state.json"),
         "turns_used": 1,
         "max_turns": max_turns,
+        "max_seconds": max_seconds,
+        "elapsed_seconds": compute_elapsed_seconds(started_at_unix),
         "model": model,
         "reasoning_effort": reasoning_effort,
         "approval_mode": approval_mode,
@@ -1085,9 +1270,12 @@ def run_codex_exec_loop(
         "task": task,
         "files_changed": [],
         "verification_commands": [],
-        "final_answer": final_text or proc.stderr.strip(),
+        "final_answer": (
+            final_text
+            or (f"Stopped after reaching the {max_seconds}-second time budget." if timed_out else stderr.strip())
+        ),
     }
-    write_state(run_dir / "state.json", {**summary, "updated_at": now_ts()})
+    write_state(run_dir / "state.json", {**summary, "updated_at": now_ts(), "started_at_unix": started_at_unix})
     return summary
 
 
@@ -1111,7 +1299,7 @@ def print_demo_next_steps() -> None:
     )
     print(
         "3) Real repo task:\n"
-        f'   {script} --max-turns 8 --approval-mode on-write "Fix the failing tests and verify the result"'
+        f'   {script} 10m --approval-mode on-write "Fix the failing tests and verify the result"'
     )
 
 
@@ -1136,6 +1324,11 @@ def main(argv: Sequence[str]) -> int:
         if args.resume:
             state_path = Path(args.resume).expanduser().resolve()
             resume_state = json.loads(state_path.read_text())
+            if not args._explicit_max_turns:
+                args.max_turns = int(resume_state.get("max_turns", args.max_turns))
+            if not args._explicit_max_seconds:
+                resume_max_seconds = resume_state.get("max_seconds", args.max_seconds)
+                args.max_seconds = int(resume_max_seconds) if resume_max_seconds is not None else None
             run_dir = Path(resume_state["run_dir"]).expanduser().resolve()
             workspace_root = normalize_workspace(resume_state.get("workspace_root", args.cwd))
         else:
@@ -1186,6 +1379,7 @@ def main(argv: Sequence[str]) -> int:
                 reasoning_effort=args.reasoning_effort,
                 approval_mode=args.approval_mode,
                 max_turns=args.max_turns,
+                max_seconds=args.max_seconds,
             )
         else:
             summary = run_loop(
@@ -1197,6 +1391,7 @@ def main(argv: Sequence[str]) -> int:
                 reasoning_effort=args.reasoning_effort,
                 approval_mode=args.approval_mode,
                 max_turns=args.max_turns,
+                max_seconds=args.max_seconds,
                 resume_state=resume_state,
                 approve_pending=args.approve_pending,
             )

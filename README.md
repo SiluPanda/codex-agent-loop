@@ -22,43 +22,57 @@ The installer:
 - merges the marketplace entry into `~/.agents/plugins/marketplace.json`
 - backs up the previous plugin install and marketplace file if they exist
 
-### 2) Check your setup
+### 2) Enable it in Codex
 
-```bash
-python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py --doctor
+After install:
+
+1. restart Codex
+2. open `/plugins`
+3. install or enable **Codex Agent Loop**
+4. start a new thread
+
+### 3) Use it inside Codex CLI
+
+Primary UX:
+
+```text
+/agent-loop --doctor
+/agent-loop --demo
+/agent-loop 10m fix the failing tests and verify the result
 ```
 
-This tells you:
+Shorthand budgets:
 
-- which backend will run
-- whether `OPENAI_API_KEY` was found
-- whether resume/approval-state is supported
-- whether Codex and the marketplace entry are installed correctly
+- `10m` = 10 minutes
+- `1h` = 1 hour
+- `5t` = 5 turns
 
-### 3) Get your first success
+### 4) First commands to try
+
+Check your setup:
+
+```text
+/agent-loop --doctor
+```
 
 Run the guided demo:
 
-```bash
-python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py --demo
+```text
+/agent-loop --demo
 ```
 
 This first demo is safe and read-only.
 
-### 4) Run a real task
+Run a real task:
 
-```bash
-python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py \
-  --max-turns 8 \
-  --approval-mode on-write \
-  "Fix the failing tests and verify the result"
+```text
+/agent-loop 10m --approval-mode on-write fix the failing tests and verify the result
 ```
 
 ## What success looks like
 
 You should see:
 
-- a backend banner
 - a status summary
 - a run directory like `~/.codex/agent-loop/runs/<timestamp>-<id>/`
 
@@ -100,76 +114,56 @@ Write example:
 
 - `/agent-loop` command
 - `codex-agent-loop` skill
-- `scripts/agent_loop.py` runner
 - `scripts/install.py` installer
 - `--doctor` environment check
 - `--demo` onboarding run
+- shorthand budgets like `10m` and `5t`
 - local run logs and resumable approval state
 
-## Backends
+## Primary UX
 
-### 1) OpenAI Responses API
+This plugin is meant to be used from inside Codex as a slash command:
 
-Used when an API key is available.
-
-Supports:
-
-- multi-turn tool loops
-- resumable approval state
-- `approval_mode=always`
-
-### 2) `codex exec` fallback
-
-Used when no API key is available but Codex is installed and authenticated.
-
-Supports:
-
-- normal loop execution
-- model selection
-- reasoning effort selection
-- ChatGPT-authenticated Codex installs
-
-Limitations:
-
-- `approval_mode=always` is unavailable
-- `--resume ... --approve-pending` is unavailable
+```text
+/agent-loop ...
+```
 
 ## Common commands
 
 ### Setup diagnosis
 
-```bash
-python3 scripts/agent_loop.py --doctor
+```text
+/agent-loop --doctor
 ```
 
 ### Guided demo
 
-```bash
-python3 scripts/agent_loop.py --demo
+```text
+/agent-loop --demo
+```
+
+### Claude-Code-style shorthand
+
+```text
+/agent-loop 10m fix the failing tests and verify the result
+```
+
+### Turn-capped run
+
+```text
+/agent-loop 5t refactor this module
 ```
 
 ### Read-only inspection
 
-```bash
-python3 scripts/agent_loop.py \
-  --max-turns 3 \
-  --approval-mode on-write \
-  "Inspect this workspace and report what files exist. Do not modify anything."
+```text
+/agent-loop 5t inspect this workspace and report what files exist. do not modify anything
 ```
 
 ### Tiny write demo
 
-```bash
-python3 scripts/agent_loop.py \
-  --approval-mode never \
-  --cwd /tmp/codex-agent-loop-demo \
-  "Create a file named hello.txt containing exactly hello from codex-agent-loop."
-```
-
-### JSON output
-
-```bash
-python3 scripts/agent_loop.py --json "Summarize this repo"
+```text
+/agent-loop 5t --approval-mode never create a file named hello.txt containing exactly hello from codex-agent-loop
 ```
 
 ## Docs

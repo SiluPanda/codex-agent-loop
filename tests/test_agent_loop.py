@@ -16,6 +16,23 @@ spec.loader.exec_module(agent_loop)
 
 
 class AgentLoopTests(unittest.TestCase):
+    def test_parse_budget_shorthand_minutes(self) -> None:
+        self.assertEqual(agent_loop.parse_budget_shorthand("10m"), ("max_seconds", 600))
+
+    def test_parse_budget_shorthand_turns(self) -> None:
+        self.assertEqual(agent_loop.parse_budget_shorthand("5t"), ("max_turns", 5))
+
+    def test_parse_args_supports_budget_shorthand(self) -> None:
+        args = agent_loop.parse_args(["10m", "fix", "the", "tests"])
+        self.assertEqual(args.max_seconds, 600)
+        self.assertEqual(args.prompt, ["fix", "the", "tests"])
+
+    def test_parse_args_shorthand_does_not_override_explicit_max_turns(self) -> None:
+        args = agent_loop.parse_args(["--max-turns=12", "10m", "fix", "the", "tests"])
+        self.assertEqual(args.max_turns, 12)
+        self.assertIsNone(args.max_seconds)
+        self.assertEqual(args.prompt, ["10m", "fix", "the", "tests"])
+
     def test_shell_command_read_only_detection(self) -> None:
         self.assertTrue(agent_loop.shell_command_is_read_only("git status"))
         self.assertTrue(agent_loop.shell_command_is_read_only("rg TODO src"))

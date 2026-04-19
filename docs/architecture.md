@@ -2,39 +2,23 @@
 
 ## Overview
 
-Codex Agent Loop provides a bounded local runner for coding tasks.
+Codex Agent Loop provides a bounded local slash-command workflow for coding tasks in Codex CLI.
 
 It exposes:
 
 - a Codex command: `/agent-loop`
 - a Codex skill: `codex-agent-loop`
-- a Python runner: `scripts/agent_loop.py`
 - an installer: `scripts/install.py`
 
-## Execution backends
+## User-facing workflow
 
-### OpenAI Responses backend
+The primary user experience is:
 
-Used when:
-
-- the OpenAI Python package is available
-- an API key is available
-
-This backend uses:
-
-- `shell`
-- `apply_patch`
-
-and can pause/resume approval state.
-
-### `codex exec` fallback
-
-Used when:
-
-- no API key is available
-- local Codex is installed
-
-This keeps the plugin useful on ChatGPT-authenticated Codex installs, but it cannot support host-managed resume/approval state.
+1. run `python3 scripts/install.py`
+2. restart Codex
+3. enable the plugin from `/plugins`
+4. start a new thread
+5. use `/agent-loop ...`
 
 ## Run artifacts
 

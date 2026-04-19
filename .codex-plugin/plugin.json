@@ -1,7 +1,7 @@
 {
   "name": "codex-agent-loop",
-  "version": "0.2.0",
-  "description": "Bounded, resumable OpenAI-native coding loops for Codex with installer, doctor, demo, shell, and apply_patch support.",
+  "version": "0.2.1",
+  "description": "Bounded, resumable OpenAI-native coding loops for Codex with installer, doctor, demo, shorthand budgets, shell, and apply_patch support.",
   "author": {
     "name": "silupanda"
   },
@@ -17,8 +17,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex Agent Loop",
-    "shortDescription": "Run bounded Claude-Code-style coding loops with doctor, demo, shell, patches, and approval pauses.",
-    "longDescription": "Codex Agent Loop adds a reusable command and skill for running bounded, resumable OpenAI-native coding loops. It now includes a one-command installer, a doctor command for setup checks, a first-run demo, local run logs, and approval pauses before writes.",
+    "shortDescription": "Run bounded Claude-Code-style coding loops with doctor, demo, shorthand budgets, shell, and approval pauses.",
+    "longDescription": "Codex Agent Loop adds a reusable command and skill for running bounded, resumable OpenAI-native coding loops. It includes a one-command installer, a doctor command for setup checks, a first-run demo, shorthand budgets like 10m and 5t, local run logs, and approval pauses before writes.",
     "developerName": "silupanda",
     "category": "Coding",
     "capabilities": [
@@ -32,6 +32,7 @@
     "defaultPrompt": [
       "Run the onboarding demo for Codex Agent Loop.",
       "Diagnose my Codex Agent Loop setup with doctor.",
+      "Run an agent loop for 10 minutes on this coding task.",
       "Run an agent loop on this coding task with an 8-turn cap.",
       "Iterate until the bug is fixed, but pause before write actions.",
       "Resume the last paused coding loop and approve the pending patch."
