@@ -341,7 +341,7 @@ def task_from_args(args: argparse.Namespace) -> str:
         parts.append(args.task)
     if args.prompt:
         parts.append(" ".join(args.prompt).strip())
-    if not sys.stdin.isatty():
+    if not args.resume and not sys.stdin.isatty():
         stdin_text = sys.stdin.read().strip()
         if stdin_text:
             parts.append(stdin_text)
@@ -411,6 +411,16 @@ def response_tool_calls(response: Any) -> list[Any]:
         if getattr(item, "type", None) in {"shell_call", "apply_patch_call"}:
             calls.append(item)
     return calls
+
+
+def normalize_subprocess_stream(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
 
 
 def shell_command_is_read_only(command: str) -> bool:
@@ -657,12 +667,12 @@ def execute_shell_call(call: Any, workspace_root: Path) -> tuple[dict[str, Any],
                 text=True,
                 timeout=timeout_ms / 1000,
             )
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
+            stdout = normalize_subprocess_stream(proc.stdout)
+            stderr = normalize_subprocess_stream(proc.stderr)
             outcome = {"type": "exit", "exit_code": int(proc.returncode)}
         except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout or ""
-            stderr = exc.stderr or ""
+            stdout = normalize_subprocess_stream(exc.stdout)
+            stderr = normalize_subprocess_stream(exc.stderr)
             outcome = {"type": "timeout"}
 
         stdout = truncate_output(stdout, max_output_length)
@@ -1354,13 +1364,13 @@ def run_codex_exec_loop(
             text=True,
             timeout=max_seconds,
         )
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
+        stdout = normalize_subprocess_stream(proc.stdout)
+        stderr = normalize_subprocess_stream(proc.stderr)
         returncode = proc.returncode
     except subprocess.TimeoutExpired as exc:
         timed_out = True
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
+        stdout = normalize_subprocess_stream(exc.stdout)
+        stderr = normalize_subprocess_stream(exc.stderr)
         returncode = 124
 
     (run_dir / "codex_exec.stdout.jsonl").write_text(stdout, encoding="utf-8")

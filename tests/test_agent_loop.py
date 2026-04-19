@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -67,6 +68,29 @@ class AgentLoopTests(unittest.TestCase):
         self.assertLessEqual(len(stdout), 10)
         self.assertEqual(stdout, log["commands"][0]["stdout"])
 
+    def test_execute_shell_call_timeout_normalizes_bytes_for_json_logging(self) -> None:
+        call = agent_loop.SimpleNamespace(
+            {
+                "call_id": "call-timeout",
+                "action": {
+                    "commands": ["sleep 5"],
+                },
+            }
+        )
+        timeout = agent_loop.subprocess.TimeoutExpired(
+            cmd=["/bin/zsh", "-lc", "sleep 5"],
+            timeout=0.1,
+            output=b"partial stdout",
+            stderr=b"partial stderr",
+        )
+        with mock.patch.object(agent_loop.subprocess, "run", side_effect=timeout):
+            output, log = agent_loop.execute_shell_call(call, Path(__file__).resolve().parents[1])
+        self.assertEqual(output["output"][0]["stdout"], "partial stdout")
+        self.assertEqual(output["output"][0]["stderr"], "partial stderr")
+        self.assertEqual(log["commands"][0]["stdout"], "partial stdout")
+        self.assertEqual(log["commands"][0]["stderr"], "partial stderr")
+        json.dumps(log)
+
     def test_update_diff_application(self) -> None:
         original = "def fib(n):\n    if n <= 1:\n        return n\n    return fib(n-1) + fib(n-2)\n"
         diff = "@@\n-def fib(n):\n+def fibonacci(n):\n     if n <= 1:\n         return n\n-    return fib(n-1) + fib(n-2)\n+    return fibonacci(n-1) + fibonacci(n-2)"
@@ -129,6 +153,33 @@ class AgentLoopTests(unittest.TestCase):
         cmd = run.call_args.args[0]
         self.assertIn("workspace-write", cmd)
 
+    def test_run_codex_exec_loop_timeout_normalizes_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            timeout = agent_loop.subprocess.TimeoutExpired(
+                cmd=["codex", "exec"],
+                timeout=1,
+                output=b'{"type":"item.completed","item":{"type":"agent_message","text":"partial result"}}\n',
+                stderr=b"timed out",
+            )
+            with mock.patch.object(agent_loop.shutil, "which", return_value="/usr/local/bin/codex"):
+                with mock.patch.object(agent_loop, "has_git_repo", return_value=True):
+                    with mock.patch.object(agent_loop.subprocess, "run", side_effect=timeout):
+                        summary = agent_loop.run_codex_exec_loop(
+                            task="inspect",
+                            workspace_root=Path(__file__).resolve().parents[1],
+                            run_dir=run_dir,
+                            model=agent_loop.DEFAULT_MODEL,
+                            reasoning_effort=agent_loop.DEFAULT_REASONING_EFFORT,
+                            approval_mode="on-write",
+                            max_turns=3,
+                            max_seconds=1,
+                        )
+            stdout_text = (run_dir / "codex_exec.stdout.jsonl").read_text(encoding="utf-8")
+            self.assertEqual(summary["status"], "max_time_reached")
+            self.assertEqual(summary["final_answer"], "partial result")
+            self.assertIn("partial result", stdout_text)
+
     def test_task_from_args_uses_demo_default_task(self) -> None:
         args = agent_loop.argparse.Namespace(
             task=None,
@@ -141,6 +192,20 @@ class AgentLoopTests(unittest.TestCase):
             fake_stdin.isatty.return_value = True
             task = agent_loop.task_from_args(args)
         self.assertEqual(task, agent_loop.DEMO_TASK)
+
+    def test_task_from_args_resume_does_not_read_stdin(self) -> None:
+        args = agent_loop.argparse.Namespace(
+            task=None,
+            prompt=[],
+            resume="state.json",
+            doctor=False,
+            demo=False,
+        )
+        with mock.patch.object(agent_loop.sys, "stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = False
+            fake_stdin.read.side_effect = AssertionError("stdin should not be read while resuming")
+            task = agent_loop.task_from_args(args)
+        self.assertEqual(task, "")
 
     def test_doctor_report_recommends_skill_entrypoint(self) -> None:
         backend = {
