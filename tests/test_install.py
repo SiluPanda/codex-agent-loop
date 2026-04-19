@@ -16,21 +16,36 @@ spec.loader.exec_module(install_script)
 class InstallScriptTests(unittest.TestCase):
     def test_merge_plugin_entry_appends_when_missing(self) -> None:
         document = {"name": "local", "interface": {"displayName": "Local"}, "plugins": []}
-        entry = install_script.plugin_entry(Path.home() / ".codex" / "plugins" / "codex-agent-loop")
+        entry = install_script.plugin_entry(Path.home() / ".codex" / "plugins" / "agent-loop")
         merged = install_script.merge_plugin_entry(document, entry)
         self.assertEqual(len(merged["plugins"]), 1)
-        self.assertEqual(merged["plugins"][0]["name"], "codex-agent-loop")
+        self.assertEqual(merged["plugins"][0]["name"], "agent-loop")
 
-    def test_merge_plugin_entry_replaces_existing(self) -> None:
+    def test_merge_plugin_entry_replaces_legacy_existing(self) -> None:
         document = {
             "name": "local",
             "interface": {"displayName": "Local"},
             "plugins": [{"name": "codex-agent-loop", "category": "Old"}],
         }
-        entry = install_script.plugin_entry(Path.home() / ".codex" / "plugins" / "codex-agent-loop")
+        entry = install_script.plugin_entry(Path.home() / ".codex" / "plugins" / "agent-loop")
         merged = install_script.merge_plugin_entry(document, entry)
         self.assertEqual(len(merged["plugins"]), 1)
         self.assertEqual(merged["plugins"][0]["category"], "Coding")
+        self.assertEqual(merged["plugins"][0]["name"], "agent-loop")
+
+    def test_merge_plugin_entry_dedupes_current_and_legacy_entries(self) -> None:
+        document = {
+            "name": "local",
+            "interface": {"displayName": "Local"},
+            "plugins": [
+                {"name": "codex-agent-loop", "category": "Old"},
+                {"name": "agent-loop", "category": "Older"},
+            ],
+        }
+        entry = install_script.plugin_entry(Path.home() / ".codex" / "plugins" / "agent-loop")
+        merged = install_script.merge_plugin_entry(document, entry)
+        self.assertEqual(len(merged["plugins"]), 1)
+        self.assertEqual(merged["plugins"][0]["name"], "agent-loop")
 
 
 if __name__ == "__main__":

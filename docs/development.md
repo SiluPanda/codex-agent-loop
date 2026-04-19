@@ -18,8 +18,8 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 
 - `scripts/agent_loop.py` — main runner
 - `scripts/install.py` — installer and marketplace merge
-- `commands/agent-loop.md` — slash command behavior
-- `skills/codex-agent-loop/SKILL.md` — skill guidance
+- `commands/run.md` — optional plugin command definition for Codex builds that surface plugin commands
+- `skills/agent-loop/SKILL.md` — skill guidance
 
 ## Release flow
 

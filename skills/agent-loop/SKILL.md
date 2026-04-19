@@ -1,9 +1,9 @@
 ---
-name: codex-agent-loop
+name: agent-loop
 description: Run bounded, resumable OpenAI-native coding loops with shell and apply_patch, similar to Claude Code agent loops. Use when the user asks for a loop, autonomous iteration, or a persistent inspect-edit-test cycle with a turn cap.
 ---
 
-# Codex Agent Loop
+# Agent Loop
 
 Use this skill for multi-step coding tasks that need a bounded agent loop instead of a single local step.
 
@@ -28,16 +28,23 @@ Shorthand budgets are also supported:
 
 ## Invocation
 
-Prefer the explicit slash command:
+Prefer invoking the bundled skill directly:
 
 ```text
-/agent-loop <task>
+$agent-loop <task>
 ```
 
 Or with a shorthand budget:
 
 ```text
-/agent-loop 10m <task>
+$agent-loop 10m <task>
+```
+
+Some Codex builds may also surface the plugin command definition. If yours
+does, the equivalent command is:
+
+```text
+/agent-loop:run <task>
 ```
 
 ## Onboarding helpers

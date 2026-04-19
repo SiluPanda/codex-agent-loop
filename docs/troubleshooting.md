@@ -18,11 +18,26 @@ Then restart Codex and start a new thread.
 
 ## Slash command is not available
 
-Make sure you:
+That is expected in many current public Codex builds. Prefer the bundled skill:
+
+```text
+$agent-loop --doctor
+```
+
+If `/agent-loop:run` is unrecognized, it is usually not a plugin installation
+problem. The runner and skill can still work normally.
+
+Still check that you:
 
 - installed the plugin from `/plugins`
 - started a new thread after installation
 - restarted Codex after updating the local plugin
+
+If you just want to verify the runner outside Codex first, use:
+
+```bash
+python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py --doctor
+```
 
 ## `approval_mode=always` does not behave how I want
 

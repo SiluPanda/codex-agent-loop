@@ -7,7 +7,7 @@ If you do not want to use `scripts/install.py`, install manually.
 Place this repo at:
 
 ```bash
-~/.codex/plugins/codex-agent-loop
+~/.codex/plugins/agent-loop
 ```
 
 ## 2) Merge the marketplace entry
@@ -18,10 +18,10 @@ Do not overwrite your whole marketplace file if you already have other plugins.
 
 ```json
 {
-  "name": "codex-agent-loop",
+  "name": "agent-loop",
   "source": {
     "source": "local",
-    "path": "./.codex/plugins/codex-agent-loop"
+    "path": "./.codex/plugins/agent-loop"
   },
   "policy": {
     "installation": "AVAILABLE",
@@ -36,12 +36,21 @@ Do not overwrite your whole marketplace file if you already have other plugins.
 Then:
 
 - open `/plugins`
-- install or enable `Codex Agent Loop`
+- install or enable `Agent Loop`
 
 ## 4) Verify
 
 Start a new thread in Codex and run:
 
 ```text
-/agent-loop --doctor
+$agent-loop --doctor
+```
+
+Current public Codex builds may not surface plugin-defined slash commands. If
+`/agent-loop:run` is unrecognized, use `$agent-loop` instead.
+
+If you only want to test the local runner first, you can also run:
+
+```bash
+python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py --doctor
 ```

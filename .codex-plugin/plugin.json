@@ -1,6 +1,6 @@
 {
-  "name": "codex-agent-loop",
-  "version": "0.2.1",
+  "name": "agent-loop",
+  "version": "0.2.2",
   "description": "Bounded, resumable OpenAI-native coding loops for Codex with installer, doctor, demo, shorthand budgets, shell, and apply_patch support.",
   "author": {
     "name": "silupanda"
@@ -16,9 +16,9 @@
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "Codex Agent Loop",
-    "shortDescription": "Run bounded Claude-Code-style coding loops with doctor, demo, shorthand budgets, shell, and approval pauses.",
-    "longDescription": "Codex Agent Loop adds a reusable command and skill for running bounded, resumable OpenAI-native coding loops. It includes a one-command installer, a doctor command for setup checks, a first-run demo, shorthand budgets like 10m and 5t, local run logs, and approval pauses before writes.",
+    "displayName": "Agent Loop",
+    "shortDescription": "Use $agent-loop for bounded Claude-Code-style coding loops with doctor, demo, shorthand budgets, shell, and approval pauses.",
+    "longDescription": "Agent Loop adds a reusable Codex skill, $agent-loop, for bounded, resumable OpenAI-native coding loops. It also includes a one-command installer, a doctor command for setup checks, a first-run demo, shorthand budgets like 10m and 5t, local run logs, and approval pauses before writes.",
     "developerName": "silupanda",
     "category": "Coding",
     "capabilities": [
@@ -30,12 +30,9 @@
     "privacyPolicyURL": "https://openai.com/policies/privacy-policy/",
     "termsOfServiceURL": "https://openai.com/policies/terms-of-use/",
     "defaultPrompt": [
-      "Run the onboarding demo for Codex Agent Loop.",
-      "Diagnose my Codex Agent Loop setup with doctor.",
-      "Run an agent loop for 10 minutes on this coding task.",
-      "Run an agent loop on this coding task with an 8-turn cap.",
-      "Iterate until the bug is fixed, but pause before write actions.",
-      "Resume the last paused coding loop and approve the pending patch."
+      "Use $agent-loop --doctor",
+      "Use $agent-loop --demo",
+      "Use $agent-loop 10m fix the failing tests and verify the result"
     ],
     "brandColor": "#111827"
   }

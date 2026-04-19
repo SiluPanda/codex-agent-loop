@@ -4,11 +4,19 @@ argument-hint: [10m|1h|5t] [task] [--max-turns N] [--max-seconds N] [--approval-
 allowed-tools: [Read, Bash]
 ---
 
-# /agent-loop
+# /agent-loop:run
+
+This command definition is included for Codex builds that surface plugin-defined
+slash commands. If `/agent-loop:run` is unrecognized in your Codex build, use
+`$agent-loop` instead.
+
+This plugin command is namespaced by plugin id, so invoke it as:
+
+`/agent-loop:run ...`
 
 Run the local Codex Agent Loop runner at:
 
-`~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py`
+`~/.codex/plugins/agent-loop/scripts/agent_loop.py`
 
 ## When to use
 
@@ -38,7 +46,7 @@ The user invoked this command with: `$ARGUMENTS`
 8. Run:
 
 ```bash
-python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py $ARGUMENTS
+python3 ~/.codex/plugins/agent-loop/scripts/agent_loop.py $ARGUMENTS
 ```
 
 9. If the runner pauses for approval:
@@ -62,5 +70,6 @@ python3 ~/.codex/plugins/codex-agent-loop/scripts/agent_loop.py $ARGUMENTS
 
 ## Examples
 
-- `/agent-loop 10m fix the failing tests`
-- `/agent-loop 5t refactor the auth module`
+- `/agent-loop:run 10m fix the failing tests`
+- `/agent-loop:run 5t refactor the auth module`
+- `$agent-loop 10m fix the failing tests`

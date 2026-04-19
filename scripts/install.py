@@ -9,7 +9,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-PLUGIN_NAME = "codex-agent-loop"
+PLUGIN_NAME = "agent-loop"
+PLUGIN_DISPLAY_NAME = "Agent Loop"
+LEGACY_PLUGIN_NAMES = ("codex-agent-loop",)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TARGET = Path.home() / ".codex" / "plugins" / PLUGIN_NAME
 DEFAULT_MARKETPLACE = Path.home() / ".agents" / "plugins" / "marketplace.json"
@@ -53,6 +55,10 @@ def plugin_entry(target_path: Path) -> dict[str, Any]:
     }
 
 
+def plugin_name_matches(name: Any) -> bool:
+    return isinstance(name, str) and name in {PLUGIN_NAME, *LEGACY_PLUGIN_NAMES}
+
+
 def default_marketplace_document() -> dict[str, Any]:
     return {
         "name": "local-plugins",
@@ -80,12 +86,18 @@ def load_marketplace(path: Path) -> dict[str, Any]:
 def merge_plugin_entry(document: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
     plugins = document.setdefault("plugins", [])
     assert isinstance(plugins, list)
-    for index, plugin in enumerate(plugins):
-        if isinstance(plugin, dict) and plugin.get("name") == entry["name"]:
-            plugins[index] = entry
-            break
-    else:
-        plugins.append(entry)
+    merged_plugins: list[Any] = []
+    inserted = False
+    for plugin in plugins:
+        if isinstance(plugin, dict) and plugin_name_matches(plugin.get("name")):
+            if not inserted:
+                merged_plugins.append(entry)
+                inserted = True
+            continue
+        merged_plugins.append(plugin)
+    if not inserted:
+        merged_plugins.append(entry)
+    document["plugins"] = merged_plugins
     return document
 
 
@@ -120,6 +132,19 @@ def copy_plugin_tree(source: Path, target: Path, dry_run: bool) -> Path | None:
     return backup
 
 
+def archive_legacy_plugin_dirs(target: Path, dry_run: bool) -> list[Path]:
+    backups: list[Path] = []
+    for legacy_name in LEGACY_PLUGIN_NAMES:
+        legacy_target = Path.home() / ".codex" / "plugins" / legacy_name
+        if legacy_target == target or not legacy_target.exists():
+            continue
+        backup = legacy_target.with_name(f"{legacy_target.name}.backup-{now_slug()}")
+        if not dry_run:
+            shutil.move(str(legacy_target), str(backup))
+        backups.append(backup)
+    return backups
+
+
 def write_marketplace(path: Path, document: dict[str, Any], dry_run: bool) -> Path | None:
     backup = backup_existing_path(path, dry_run)
     if not dry_run:
@@ -134,6 +159,7 @@ def print_summary(
     target: Path,
     marketplace: Path,
     plugin_backup: Path | None,
+    legacy_plugin_backups: list[Path],
     marketplace_backup: Path | None,
     dry_run: bool,
 ) -> None:
@@ -144,14 +170,17 @@ def print_summary(
     print(f"Marketplace: {marketplace}")
     if plugin_backup:
         print(f"Plugin backup: {plugin_backup}")
+    for legacy_backup in legacy_plugin_backups:
+        print(f"Legacy plugin backup: {legacy_backup}")
     if marketplace_backup:
         print(f"Marketplace backup: {marketplace_backup}")
     print("Next steps:")
     print("1) Restart Codex")
     print("2) Open /plugins")
-    print("3) Install or enable Codex Agent Loop")
+    print(f"3) Install or enable {PLUGIN_DISPLAY_NAME}")
     print(f"4) Run: python3 {target / 'scripts' / 'agent_loop.py'} --doctor")
     print(f"5) Run: python3 {target / 'scripts' / 'agent_loop.py'} --demo")
+    print("6) In Codex, use: $agent-loop --doctor")
 
 
 def main() -> int:
@@ -170,6 +199,7 @@ def main() -> int:
     entry = plugin_entry(target)
     document = merge_plugin_entry(load_marketplace(marketplace), entry)
 
+    legacy_plugin_backups = archive_legacy_plugin_dirs(target, args.dry_run)
     plugin_backup = copy_plugin_tree(source, target, args.dry_run)
     marketplace_backup = write_marketplace(marketplace, document, args.dry_run)
 
@@ -178,6 +208,7 @@ def main() -> int:
         target=target,
         marketplace=marketplace,
         plugin_backup=plugin_backup,
+        legacy_plugin_backups=legacy_plugin_backups,
         marketplace_backup=marketplace_backup,
         dry_run=args.dry_run,
     )

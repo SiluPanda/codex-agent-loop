@@ -33,10 +33,18 @@ REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 RUNS_DIR = Path.home() / ".codex" / "agent-loop" / "runs"
 AUTH_JSON = Path.home() / ".codex" / "auth.json"
 MARKETPLACE_JSON = Path.home() / ".agents" / "plugins" / "marketplace.json"
-INSTALLED_PLUGIN_DIR = Path.home() / ".codex" / "plugins" / "codex-agent-loop"
+PLUGIN_NAME = "agent-loop"
+LEGACY_PLUGIN_NAMES = {"codex-agent-loop"}
+INSTALLED_PLUGIN_DIR = Path.home() / ".codex" / "plugins" / PLUGIN_NAME
+PLUGIN_SLASH_COMMAND = "/agent-loop:run"
+PLUGIN_SKILL = "$agent-loop"
+PLUGIN_SLASH_COMMAND_NOTE = (
+    "Plugin-defined slash commands are not guaranteed in current public Codex builds. "
+    f"If {PLUGIN_SLASH_COMMAND} is unrecognized, use {PLUGIN_SKILL} instead."
+)
 PLUGIN_SCRIPT = Path(__file__).resolve()
 PLUGIN_ROOT = PLUGIN_SCRIPT.parents[1]
-DOCTOR_SCHEMA_VERSION = 1
+DOCTOR_SCHEMA_VERSION = 2
 DEMO_TASK = "Inspect this workspace and report what files exist. Do not modify anything."
 
 SAFE_COMMANDS = {
@@ -667,7 +675,9 @@ def marketplace_contains_plugin(path: Path = MARKETPLACE_JSON) -> bool:
     if isinstance(data, dict):
         plugins = data.get("plugins", [])
         return isinstance(plugins, list) and any(
-            isinstance(plugin, dict) and plugin.get("name") == "codex-agent-loop" for plugin in plugins
+            isinstance(plugin, dict)
+            and plugin.get("name") in ({PLUGIN_NAME} | LEGACY_PLUGIN_NAMES)
+            for plugin in plugins
         )
     if isinstance(data, list):
         for item in data:
@@ -675,7 +685,9 @@ def marketplace_contains_plugin(path: Path = MARKETPLACE_JSON) -> bool:
                 continue
             plugins = item.get("plugins", [])
             if isinstance(plugins, list) and any(
-                isinstance(plugin, dict) and plugin.get("name") == "codex-agent-loop" for plugin in plugins
+                isinstance(plugin, dict)
+                and plugin.get("name") in ({PLUGIN_NAME} | LEGACY_PLUGIN_NAMES)
+                for plugin in plugins
             ):
                 return True
     return False
@@ -759,6 +771,10 @@ def build_doctor_report(cwd: str) -> dict[str, Any]:
         "marketplace_path": str(MARKETPLACE_JSON),
         "marketplace_present": marketplace_present,
         "marketplace_contains_plugin": marketplace_has_plugin,
+        "codex_recommended_entrypoint": PLUGIN_SKILL,
+        "codex_slash_command": PLUGIN_SLASH_COMMAND,
+        "codex_slash_command_note": PLUGIN_SLASH_COMMAND_NOTE,
+        "codex_skill": PLUGIN_SKILL,
         "backend": backend["backend"],
         "backend_label": backend["backend_label"],
         "backend_note": backend["backend_note"],
@@ -787,6 +803,10 @@ def print_doctor_report(report: dict[str, Any]) -> None:
         "Marketplace entry: "
         f"{'yes' if report['marketplace_contains_plugin'] else 'no'} ({report['marketplace_path']})"
     )
+    print(f"Recommended Codex entrypoint: {report['codex_recommended_entrypoint']}")
+    print(f"Plugin slash command: {report['codex_slash_command']}")
+    print(f"Slash command note: {report['codex_slash_command_note']}")
+    print(f"Codex skill: {report['codex_skill']}")
     print(f"Codex executable: {'yes' if report['codex_available'] else 'no'}")
     print(f"OpenAI Python package: {'yes' if report['openai_package_available'] else 'no'}")
     if report.get("openai_import_error"):
@@ -962,7 +982,7 @@ def run_loop(
             tools=tools,
             parallel_tool_calls=False,
             reasoning={"effort": reasoning_effort},
-            metadata={"runner": "codex-agent-loop", "turn": str(turns_used)},
+            metadata={"runner": PLUGIN_NAME, "turn": str(turns_used)},
         )
         response_payload = serialize_model(response)
         append_jsonl(responses_jsonl, response_payload)
@@ -1287,7 +1307,7 @@ def print_demo_intro(workspace_root: Path) -> None:
 
 
 def print_demo_next_steps() -> None:
-    demo_write_dir = Path(tempfile.mkdtemp(prefix="codex-agent-loop-demo-"))
+    demo_write_dir = Path(tempfile.mkdtemp(prefix="agent-loop-demo-"))
     script = quoted_script_command()
     print("\nQuickstart complete.")
     print("Next commands to try:")
@@ -1295,7 +1315,7 @@ def print_demo_next_steps() -> None:
     print(
         "2) Tiny write demo in a throwaway directory:\n"
         f"   {script} --cwd {shlex.quote(str(demo_write_dir))} --approval-mode never "
-        '"Create a file named hello.txt containing exactly hello from codex-agent-loop."'
+        '"Create a file named hello.txt containing exactly hello from agent-loop."'
     )
     print(
         "3) Real repo task:\n"

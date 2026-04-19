@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -73,6 +74,38 @@ class AgentLoopTests(unittest.TestCase):
             fake_stdin.isatty.return_value = True
             task = agent_loop.task_from_args(args)
         self.assertEqual(task, agent_loop.DEMO_TASK)
+
+    def test_doctor_report_recommends_skill_entrypoint(self) -> None:
+        backend = {
+            "backend": "codex-exec",
+            "backend_label": "codex exec fallback",
+            "backend_note": "note",
+            "openai_package_available": True,
+            "openai_import_error": "",
+            "api_key_source": "none",
+            "codex_available": True,
+            "codex_path": "/usr/local/bin/codex",
+            "resume_supported": False,
+            "approval_mode_always_supported": False,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            plugin_dir = tmp / "agent-loop"
+            plugin_dir.mkdir()
+            marketplace = tmp / "marketplace.json"
+            marketplace.write_text('{"plugins":[]}')
+            script_path = plugin_dir / "scripts" / "agent_loop.py"
+            with mock.patch.object(agent_loop, "build_backend_report", return_value=backend):
+                with mock.patch.object(agent_loop, "normalize_workspace", return_value=tmp):
+                    with mock.patch.object(agent_loop, "INSTALLED_PLUGIN_DIR", plugin_dir):
+                        with mock.patch.object(agent_loop, "MARKETPLACE_JSON", marketplace):
+                            with mock.patch.object(agent_loop, "PLUGIN_SCRIPT", script_path):
+                                with mock.patch.object(
+                                    agent_loop, "marketplace_contains_plugin", return_value=True
+                                ):
+                                    report = agent_loop.build_doctor_report(str(tmp))
+        self.assertEqual(report["codex_recommended_entrypoint"], "$agent-loop")
+        self.assertIn("public Codex builds", report["codex_slash_command_note"])
 
 
 if __name__ == "__main__":
