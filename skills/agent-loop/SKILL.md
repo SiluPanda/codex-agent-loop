@@ -20,6 +20,12 @@ Use this skill for multi-step coding tasks that need a bounded agent loop instea
 - `--model gpt-5.4`
 - `--reasoning-effort high`
 
+Important:
+
+- Agent Loop is **bounded**. It should stop when the task looks complete, when it hits its turn/time budget, when it pauses for approval, or when an error occurs.
+- In fallback mode without `OPENAI_API_KEY`, Agent Loop runs one `codex exec` session. That session may finish on the first turn for short read-only tasks.
+- A stop reason like `completed_via_fallback` means the task completed through the fallback backend; it does **not** mean the run failed.
+
 Shorthand budgets are also supported:
 
 - `10m` = 10 minutes

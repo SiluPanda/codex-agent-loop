@@ -1281,12 +1281,16 @@ class SimpleNamespace:
 def print_human_summary(summary: dict[str, Any]) -> None:
     print(f"Status: {summary['status']}")
     print(f"Stop reason: {summary['stop_reason']}")
+    if summary.get("backend"):
+        print(f"Backend: {summary['backend']}")
     print(f"Turns used: {summary['turns_used']}/{summary['max_turns']}")
     if summary.get("max_seconds") is not None:
         print(f"Time budget: {summary['max_seconds']}s")
     if summary.get("elapsed_seconds") is not None:
         print(f"Elapsed: {summary['elapsed_seconds']}s")
     print(f"Run dir: {summary['run_dir']}")
+    if summary.get("note"):
+        print(f"Note: {summary['note']}")
     if summary.get("files_changed"):
         print("Files changed:")
         for path in summary["files_changed"]:
@@ -1503,7 +1507,7 @@ def run_codex_exec_loop(
 
     summary = {
         "status": "max_time_reached" if timed_out else ("completed" if returncode == 0 else "completed_with_warnings"),
-        "stop_reason": "max_time_reached" if timed_out else "codex_exec_fallback",
+        "stop_reason": "max_time_reached" if timed_out else "completed_via_fallback",
         "backend": "codex-exec",
         "run_dir": str(run_dir),
         "state_path": str(run_dir / "state.json"),
@@ -1518,6 +1522,13 @@ def run_codex_exec_loop(
         "task": task,
         "files_changed": diff_workspace_snapshots(before_snapshot, after_snapshot),
         "verification_commands": list(telemetry["verification_commands"]),
+        "note": (
+            "Completed via the codex exec fallback backend. "
+            "In fallback mode, Agent Loop runs one codex exec session and may finish before max_turns "
+            "if the task appears complete."
+            if not timed_out
+            else ""
+        ),
         "final_answer": (
             final_text
             or (f"Stopped after reaching the {max_seconds}-second time budget." if timed_out else stderr.strip())

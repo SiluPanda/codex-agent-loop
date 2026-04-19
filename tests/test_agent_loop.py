@@ -223,6 +223,29 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual(summary["final_answer"], "partial result")
             self.assertIn("partial result", stdout_text)
 
+    def test_run_codex_exec_loop_uses_clearer_fallback_stop_reason_and_note(self) -> None:
+        with temporary_directory_or_skip(self) as run_dir:
+            stdout = '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}'
+            with mock.patch.object(agent_loop.shutil, "which", return_value="/usr/local/bin/codex"):
+                with mock.patch.object(agent_loop, "has_git_repo", return_value=False):
+                    with mock.patch.object(
+                        agent_loop.subprocess,
+                        "run",
+                        return_value=mock.Mock(returncode=0, stdout=stdout, stderr=""),
+                    ):
+                        summary = agent_loop.run_codex_exec_loop(
+                            task="inspect",
+                            workspace_root=Path(__file__).resolve().parents[1],
+                            run_dir=run_dir,
+                            model=agent_loop.DEFAULT_MODEL,
+                            reasoning_effort=agent_loop.DEFAULT_REASONING_EFFORT,
+                            approval_mode="on-write",
+                            max_turns=3,
+                            max_seconds=60,
+                        )
+        self.assertEqual(summary["stop_reason"], "completed_via_fallback")
+        self.assertIn("codex exec fallback backend", summary["note"])
+
     def test_run_codex_exec_loop_surfaces_telemetry(self) -> None:
         with temporary_directory_or_skip(self) as run_dir:
             stdout = "\n".join(
@@ -344,7 +367,7 @@ class AgentLoopTests(unittest.TestCase):
         }
         summary = {
             "status": "completed",
-            "stop_reason": "codex_exec_fallback",
+            "stop_reason": "completed_via_fallback",
             "turns_used": 1,
             "max_turns": 8,
             "run_dir": "/tmp/run",
@@ -363,6 +386,23 @@ class AgentLoopTests(unittest.TestCase):
         printed_backend = banner.call_args.args[0]
         self.assertEqual(printed_backend["backend"], "codex-exec")
         self.assertIn("falling back to codex exec", printed_backend["backend_note"])
+
+    def test_print_human_summary_includes_backend_and_note(self) -> None:
+        buffer = io.StringIO()
+        summary = {
+            "status": "completed",
+            "stop_reason": "completed_via_fallback",
+            "backend": "codex-exec",
+            "turns_used": 1,
+            "max_turns": 8,
+            "run_dir": "/tmp/run",
+            "note": "Completed via the codex exec fallback backend.",
+        }
+        with mock.patch("sys.stdout", buffer):
+            agent_loop.print_human_summary(summary)
+        output = buffer.getvalue()
+        self.assertIn("Backend: codex-exec", output)
+        self.assertIn("Note: Completed via the codex exec fallback backend.", output)
 
 
 if __name__ == "__main__":
