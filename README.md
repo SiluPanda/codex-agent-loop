@@ -4,6 +4,24 @@ A local Codex plugin that gives Codex a Claude-Code-style loop runner for bounde
 
 GitHub: https://github.com/SiluPanda/codex-agent-loop
 
+## Preview
+
+Animated write-flow demo:
+
+![Codex Agent Loop demo GIF](docs/assets/agent-loop-demo.gif)
+
+CLI help:
+
+![Codex Agent Loop help screenshot](docs/assets/agent-loop-help.png)
+
+Read-only inspection example:
+
+![Codex Agent Loop read-only screenshot](docs/assets/agent-loop-readonly.png)
+
+Write example:
+
+![Codex Agent Loop write screenshot](docs/assets/agent-loop-write.png)
+
 It ships with:
 
 - a `/agent-loop` command
